@@ -318,6 +318,86 @@ fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     }
 }
 
+#[allow(dead_code)] // TODO(task-6): remove once used by single-pair output
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verdict {
+    Identical,
+    LikelySpoof,
+    LikelyBenign,
+}
+
+impl Verdict {
+    #[allow(dead_code)] // TODO(task-6): remove once used by single-pair output
+    fn tag(self) -> &'static str {
+        match self {
+            Verdict::Identical => "IDENTICAL",
+            Verdict::LikelySpoof => "LIKELY SPOOF",
+            Verdict::LikelyBenign => "LIKELY BENIGN",
+        }
+    }
+}
+
+/// Classify a scored pair into a human verdict + explanation sentence.
+/// `len_a`/`len_b` are character counts; `len_tolerance` bounds the
+/// length-difference ratio allowed for a spoof verdict (default 0.25).
+#[allow(dead_code)] // TODO(task-6): remove once used by single-pair output
+fn verdict(s: &Scores, len_a: usize, len_b: usize, len_tolerance: f64) -> (Verdict, String) {
+    // dam == 0 means the strings are byte-identical.
+    if s.dam == 0 {
+        return (Verdict::Identical, "The strings are identical.".to_string());
+    }
+
+    let maxlen = len_a.max(len_b).max(1) as f64;
+    let len_diff_ratio = (len_a as f64 - len_b as f64).abs() / maxlen;
+    // Fraction of the edit distance explained by homoglyphs. Can be negative
+    // when skeletonization expands length (skel > dam); the > 0.5 test below
+    // handles that safely.
+    let homoglyph_share = if s.dam == 0 {
+        0.0
+    } else {
+        (s.dam as f64 - s.skel) / s.dam as f64
+    };
+
+    let is_spoof = s.confusable_only
+        || (homoglyph_share > 0.5 && len_a.max(len_b) >= 3 && len_diff_ratio <= len_tolerance);
+
+    // Pluralize the edit count once; reuse in every message.
+    let edits = if s.dam == 1 {
+        "1 edit".to_string()
+    } else {
+        format!("{} edits", s.dam)
+    };
+
+    if is_spoof {
+        let detail = if s.confusable_only {
+            "every differing character is a homoglyph (the strings are visually identical)"
+        } else {
+            "most of the difference comes from homoglyphs (visually confusable characters)"
+        };
+        let msg = format!(
+            "The strings differ by {edits}, but {detail}. High likelihood of an attempt to confuse."
+        );
+        return (Verdict::LikelySpoof, msg);
+    }
+
+    // Benign: typo (small distance) vs unrelated (large distance).
+    let msg = if s.dam <= 2 {
+        let homo_note = if s.skel < s.dam as f64 {
+            " (with only minor homoglyph involvement)"
+        } else {
+            ""
+        };
+        format!(
+            "The strings differ by {edits} with no significant homoglyph involvement{homo_note} — likely a typo."
+        )
+    } else {
+        format!(
+            "The strings differ by {edits} with no significant homoglyph involvement — they appear unrelated."
+        )
+    };
+    (Verdict::LikelyBenign, msg)
+}
+
 /// One JSONL record for a scored pair. `keys` names the two strings (e.g.
 /// ("a","b") or ("input","match")). `fields` = None emits all score fields;
 /// Some(list) emits only those (identifier keys are always included).
@@ -995,5 +1075,58 @@ mod tests {
         let full = result_json("GOOGLE", "GO0GLE", &s, ("a", "b"), None);
         assert!(full.contains("\"levenshtein\":"));
         assert!(full.contains("\"skeleton_normalized\":"));
+    }
+
+    #[test]
+    fn verdict_identical() {
+        let s = score_pair("abc", "abc", 0.1);
+        let (cat, msg) = verdict(&s, 3, 3, 0.25);
+        assert_eq!(cat, Verdict::Identical);
+        assert!(msg.to_lowercase().contains("identical"));
+    }
+
+    #[test]
+    fn verdict_single_char_spoof() {
+        // GO0GLE vs GOOGLE: one homoglyph substitution, confusable_only=true.
+        let s = score_pair("GOOGLE", "GO0GLE", 0.1);
+        let (cat, _msg) = verdict(&s, 6, 6, 0.25);
+        assert_eq!(cat, Verdict::LikelySpoof);
+    }
+
+    #[test]
+    fn verdict_multichar_spoof_unequal_length() {
+        // rnicrosoft (10) vs microsoft (9): confusable_only=true, lengths differ
+        // by 0.1 ratio — must still be a spoof.
+        let s = score_pair("rnicrosoft", "microsoft", 0.1);
+        let (cat, _msg) = verdict(&s, 10, 9, 0.25);
+        assert_eq!(cat, Verdict::LikelySpoof);
+    }
+
+    #[test]
+    fn verdict_benign_typo() {
+        // google vs gogle: 1 edit, NOT a homoglyph.
+        let s = score_pair("google", "gogle", 0.1);
+        let (cat, msg) = verdict(&s, 6, 5, 0.25);
+        assert_eq!(cat, Verdict::LikelyBenign);
+        assert!(msg.to_lowercase().contains("typo"));
+    }
+
+    #[test]
+    fn verdict_benign_unrelated() {
+        // Distant, no homoglyph involvement.
+        let s = score_pair("apple", "xylophone", 0.1);
+        let (cat, msg) = verdict(&s, 5, 9, 0.25);
+        assert_eq!(cat, Verdict::LikelyBenign);
+        assert!(msg.to_lowercase().contains("unrelated"));
+    }
+
+    #[test]
+    fn verdict_length_tolerance_boundary() {
+        // A high homoglyph_share but a big length difference must NOT be a spoof
+        // unless confusable_only. "a0" vs "aOxyz": '0'~'O' but xyz are real edits,
+        // so confusable_only is false; lengths 2 vs 5 (ratio 0.6 > 0.25).
+        let s = score_pair("a0", "aOxyz", 0.1);
+        let (cat, _msg) = verdict(&s, 2, 5, 0.25);
+        assert_eq!(cat, Verdict::LikelyBenign);
     }
 }
