@@ -4,6 +4,21 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast string-distance CLI for typosquatting and homoglyph detection (Levenshtein, Damerau-Levenshtein, UTS#39 confusable-weighted)."
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/ericfitz/homoglyph-dist"
+homepage = "https://github.com/ericfitz/homoglyph-dist"
+readme = "README.md"
+keywords = ["typosquatting", "homoglyph", "levenshtein", "security", "unicode"]
+categories = ["command-line-utilities", "text-processing"]
+# Publish only what the crate needs — exclude repo tooling, design docs, and the
+# release/signing scripts.
+include = [
+    "/src/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/LICENSE-MIT",
+    "/LICENSE-APACHE",
+    "/scripts/gen_confusables.py",
+]
 
 [[bin]]
 name = "sqdist"
