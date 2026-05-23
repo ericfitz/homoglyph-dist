@@ -195,7 +195,6 @@ fn process_list<I: Iterator<Item = String>>(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // TODO(task-5): remove once used
 enum Field {
     Levenshtein,
     Damerau,
@@ -233,6 +232,19 @@ impl Field {
 
     fn from_name(s: &str) -> Option<Field> {
         Field::ALL.into_iter().find(|f| f.name() == s)
+    }
+
+    /// This field's value formatted for JSON / human output.
+    fn value_string(self, s: &Scores) -> String {
+        match self {
+            Field::Levenshtein => s.lev.to_string(),
+            Field::Damerau => s.dam.to_string(),
+            Field::HomoglyphDamerau => s.hogl.to_string(),
+            Field::SkeletonDamerau => s.skel.to_string(),
+            Field::Normalized => format!("{:.4}", s.norm),
+            Field::SkeletonNormalized => format!("{:.4}", s.skel_norm),
+            Field::ConfusableOnly => s.confusable_only.to_string(),
+        }
     }
 }
 
@@ -306,28 +318,42 @@ fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     }
 }
 
-/// One JSONL record for a scored pair, using the given key names for the two
-/// strings (e.g. ("a","b") for single-pair/stdin, ("input","match") for --list).
-fn result_json(a: &str, b: &str, s: &Scores, keys: (&str, &str)) -> String {
-    format!(
-        "{{\"{}\":{:?},\"{}\":{:?},\"levenshtein\":{},\"damerau\":{},\
-         \"homoglyph_damerau\":{},\"skeleton_damerau\":{},\
-         \"normalized\":{:.4},\"skeleton_normalized\":{:.4},\"confusable_only\":{}}}",
-        keys.0, a, keys.1, b, s.lev, s.dam, s.hogl, s.skel, s.norm, s.skel_norm, s.confusable_only
-    )
+/// One JSONL record for a scored pair. `keys` names the two strings (e.g.
+/// ("a","b") or ("input","match")). `fields` = None emits all score fields;
+/// Some(list) emits only those (identifier keys are always included).
+fn result_json(
+    a: &str,
+    b: &str,
+    s: &Scores,
+    keys: (&str, &str),
+    fields: Option<&[Field]>,
+) -> String {
+    let mut out = format!("{{\"{}\":{:?},\"{}\":{:?}", keys.0, a, keys.1, b);
+    for f in selected_fields(fields) {
+        out.push_str(&format!(",\"{}\":{}", f.name(), f.value_string(s)));
+    }
+    out.push('}');
+    out
 }
 
-fn emit(a: &str, b: &str, s: &Scores, json: bool) {
+/// The fields to emit, in canonical order: all when None, else the given slice
+/// (already canonical-ordered by parse_fields).
+fn selected_fields(fields: Option<&[Field]>) -> Vec<Field> {
+    match fields {
+        None => Field::ALL.to_vec(),
+        Some(list) => list.to_vec(),
+    }
+}
+
+fn emit(a: &str, b: &str, s: &Scores, json: bool, fields: Option<&[Field]>) {
     if json {
-        println!("{}", result_json(a, b, s, ("a", "b")));
+        println!("{}", result_json(a, b, s, ("a", "b"), fields));
     } else {
-        println!("levenshtein          {}", s.lev);
-        println!("damerau              {}", s.dam);
-        println!("homoglyph_damerau    {}", s.hogl);
-        println!("skeleton_damerau     {}", s.skel);
-        println!("normalized           {:.4}", s.norm);
-        println!("skeleton_normalized  {:.4}", s.skel_norm);
-        println!("confusable_only      {}", s.confusable_only);
+        // Pad labels to a fixed column so values align (longest label is
+        // "skeleton_normalized" = 19 chars; pad to 20 then a space).
+        for f in selected_fields(fields) {
+            println!("{:<20} {}", f.name(), f.value_string(s));
+        }
     }
 }
 
@@ -502,7 +528,7 @@ fn main() -> ExitCode {
                 opts.top,
             );
             for (a, b, s) in &results {
-                let _ = writeln!(out, "{}", result_json(a, b, s, ("input", "match")));
+                let _ = writeln!(out, "{}", result_json(a, b, s, ("input", "match"), None));
             }
         } else {
             // No ranking: stream each kept row straight out, no buffering.
@@ -510,7 +536,7 @@ fn main() -> ExitCode {
                 if let Some((a, b, s)) =
                     score_candidate(string, &raw, opts.hogl_weight, opts.metric, opts.threshold)
                 {
-                    let _ = writeln!(out, "{}", result_json(&a, &b, &s, ("input", "match")));
+                    let _ = writeln!(out, "{}", result_json(&a, &b, &s, ("input", "match"), None));
                 }
             }
         }
@@ -544,7 +570,7 @@ fn main() -> ExitCode {
                     continue;
                 }
             }
-            let _ = writeln!(out, "{}", result_json(la, lb, &s, ("a", "b")));
+            let _ = writeln!(out, "{}", result_json(la, lb, &s, ("a", "b"), None));
         }
         return ExitCode::SUCCESS;
     }
@@ -553,7 +579,7 @@ fn main() -> ExitCode {
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
     let s = score_pair(a, b, opts.hogl_weight);
-    emit(a, b, &s, opts.json);
+    emit(a, b, &s, opts.json, None);
     if let Some(t) = opts.threshold {
         return if metric_value(&s, opts.metric) <= t {
             ExitCode::SUCCESS
@@ -753,7 +779,7 @@ mod tests {
     #[test]
     fn result_json_uses_given_keys_and_all_fields() {
         let s = score_pair("paypal", "p\u{0430}ypal", 0.1);
-        let line = result_json("paypal", "p\u{0430}ypal", &s, ("a", "b"));
+        let line = result_json("paypal", "p\u{0430}ypal", &s, ("a", "b"), None);
         assert!(line.starts_with("{\"a\":\"paypal\""));
         assert!(line.contains("\"homoglyph_damerau\":"));
         assert!(line.contains("\"skeleton_damerau\":"));
@@ -762,7 +788,7 @@ mod tests {
         assert!(line.contains("\"confusable_only\":true"));
 
         // File-mode keys.
-        let line2 = result_json("paypal", "p\u{0430}ypal", &s, ("input", "match"));
+        let line2 = result_json("paypal", "p\u{0430}ypal", &s, ("input", "match"), None);
         assert!(line2.starts_with("{\"input\":\"paypal\",\"match\":"));
     }
 
@@ -952,5 +978,22 @@ mod tests {
         // Repeated names collapse to one, still canonical order.
         let f = parse_fields("damerau,damerau,levenshtein").unwrap();
         assert_eq!(f, vec![Field::Levenshtein, Field::Damerau]);
+    }
+
+    #[test]
+    fn result_json_respects_field_filter() {
+        let s = score_pair("GOOGLE", "GO0GLE", 0.1);
+        // Filtered: only the two requested fields, plus identifier keys.
+        let only = vec![Field::Damerau, Field::ConfusableOnly];
+        let line = result_json("GOOGLE", "GO0GLE", &s, ("a", "b"), Some(&only));
+        assert!(line.starts_with("{\"a\":\"GOOGLE\",\"b\":\"GO0GLE\""));
+        assert!(line.contains("\"damerau\":"));
+        assert!(line.contains("\"confusable_only\":"));
+        assert!(!line.contains("\"levenshtein\":"));
+        assert!(!line.contains("\"skeleton_damerau\":"));
+        // None = all fields (back-compat).
+        let full = result_json("GOOGLE", "GO0GLE", &s, ("a", "b"), None);
+        assert!(full.contains("\"levenshtein\":"));
+        assert!(full.contains("\"skeleton_normalized\":"));
     }
 }
