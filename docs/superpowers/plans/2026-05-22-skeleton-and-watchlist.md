@@ -128,7 +128,7 @@ Add to `mod tests`:
     fn skeleton_damerau_catches_multichar_spoof() {
         let s = score_pair("rnicrosoft", "microsoft", 0.1);
         // Per-char metric can't align "rn" to "m", so it costs real edits.
-        assert!(s.homo > 1.0, "homoglyph_damerau should be > 1, got {}", s.homo);
+        assert!(s.hogl > 1.0, "homoglyph_damerau should be > 1, got {}", s.hogl);
         // Skeleton metric sees identical skeletons => zero.
         assert!(s.skel.abs() < 1e-9, "skeleton_damerau should be ~0, got {}", s.skel);
         assert!(s.confusable_only, "should be confusable_only");
@@ -166,9 +166,9 @@ Replace the `Scores` struct (lines 104-110) with:
 struct Scores {
     lev: u64,
     dam: u64,
-    homo: f64,      // per-char weighted Damerau (single-char confusables)
+    hogl: f64,      // per-char weighted Damerau (single-char confusables)
     skel: f64,      // Damerau on full skeletons (multi-char aware)
-    norm: f64,      // homo / max(len)
+    norm: f64,      // hogl / max(len)
     skel_norm: f64, // skel / max(skeleton len)
     confusable_only: bool,
 }
@@ -177,12 +177,12 @@ struct Scores {
 Replace `score_pair` (lines 112-129) with:
 
 ```rust
-fn score_pair(a: &str, b: &str, homo_weight: f64) -> Scores {
+fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     let ca: Vec<char> = a.chars().collect();
     let cb: Vec<char> = b.chars().collect();
     let lev = levenshtein(&ca, &cb, false, 0.0);
     let dam = damerau(&ca, &cb, false, 0.0);
-    let homo = damerau(&ca, &cb, true, homo_weight);
+    let hogl = damerau(&ca, &cb, true, hogl_weight);
 
     let ska = skeleton(a);
     let skb = skeleton(b);
@@ -197,9 +197,9 @@ fn score_pair(a: &str, b: &str, homo_weight: f64) -> Scores {
     Scores {
         lev: lev as u64,
         dam: dam as u64,
-        homo,
+        hogl,
         skel,
-        norm: homo / maxlen,
+        norm: hogl / maxlen,
         skel_norm: skel / skel_maxlen,
         confusable_only,
     }
@@ -248,7 +248,7 @@ Add to `mod tests`:
     #[test]
     fn metric_value_selects_field() {
         let s = score_pair("rnicrosoft", "microsoft", 0.1);
-        assert_eq!(metric_value(&s, Metric::Homoglyph), s.homo);
+        assert_eq!(metric_value(&s, Metric::Homoglyph), s.hogl);
         assert_eq!(metric_value(&s, Metric::Skeleton), s.skel);
     }
 ```
@@ -272,7 +272,7 @@ enum Metric {
 /// The distance used for thresholding/sorting, per the chosen metric.
 fn metric_value(s: &Scores, m: Metric) -> f64 {
     match m {
-        Metric::Homoglyph => s.homo,
+        Metric::Homoglyph => s.hogl,
         Metric::Skeleton => s.skel,
     }
 }
@@ -446,7 +446,7 @@ fn result_json(a: &str, b: &str, s: &Scores, keys: (&str, &str)) -> String {
         "{{\"{}\":{:?},\"{}\":{:?},\"levenshtein\":{},\"damerau\":{},\
          \"homoglyph_damerau\":{},\"skeleton_damerau\":{},\
          \"normalized\":{:.4},\"skeleton_normalized\":{:.4},\"confusable_only\":{}}}",
-        keys.0, a, keys.1, b, s.lev, s.dam, s.homo, s.skel, s.norm, s.skel_norm, s.confusable_only
+        keys.0, a, keys.1, b, s.lev, s.dam, s.hogl, s.skel, s.norm, s.skel_norm, s.confusable_only
     )
 }
 ```
@@ -460,7 +460,7 @@ fn emit(a: &str, b: &str, s: &Scores, json: bool) {
     } else {
         println!("levenshtein          {}", s.lev);
         println!("damerau              {}", s.dam);
-        println!("homoglyph_damerau    {}", s.homo);
+        println!("homoglyph_damerau    {}", s.hogl);
         println!("skeleton_damerau     {}", s.skel);
         println!("normalized           {:.4}", s.norm);
         println!("skeleton_normalized  {:.4}", s.skel_norm);
@@ -567,7 +567,7 @@ Replace the `Opts` struct (lines 146-151) with:
 
 ```rust
 struct Opts {
-    homo_weight: f64,
+    hogl_weight: f64,
     json: bool,
     threshold: Option<f64>,
     stdin: bool,
@@ -586,7 +586,7 @@ Replace `parse_args` (lines 169-212) with `parse_from` plus a thin `parse_args` 
 fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
     let mut args = argv.into_iter();
     let mut opts = Opts {
-        homo_weight: 0.1,
+        hogl_weight: 0.1,
         json: false,
         threshold: None,
         stdin: false,
@@ -629,9 +629,9 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
                     other => return Err(format!("invalid --metric: {other} (use homoglyph|skeleton)")),
                 };
             }
-            "-w" | "--homo-weight" => {
-                let v = args.next().ok_or("--homo-weight needs a value")?;
-                opts.homo_weight = v.parse().map_err(|_| "invalid --homo-weight")?;
+            "-w" | "--hogl-weight" => {
+                let v = args.next().ok_or("--hogl-weight needs a value")?;
+                opts.hogl_weight = v.parse().map_err(|_| "invalid --hogl-weight")?;
             }
             "-t" | "--threshold" => {
                 let v = args.next().ok_or("--threshold needs a value")?;
@@ -688,7 +688,7 @@ fn print_usage() {
          \x20   sqdist [OPTIONS] --stdin                    # batch: pre-paired lines\n\
          \x20   sqdist [OPTIONS] --string <S> --list <FILE> # score <S> vs each line\n\n\
          OPTIONS:\n\
-         \x20   -w, --homo-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
+         \x20   -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
          \x20   -t, --threshold <F>     Alert (emit / exit 0) when the --metric distance <= F\n\
          \x20   -m, --metric <M>        Distance for -t and --sort: homoglyph|skeleton (default skeleton)\n\
          \x20   -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL\n\
@@ -775,7 +775,7 @@ EOF
 
 - [ ] **Step 1: Write the failing test for the list-processing helper**
 
-This task adds `process_list(string, lines, homo_weight, metric, threshold, sort, top) -> Vec<(String,String,Scores)>` — pure over an iterator of lines so it is unit-testable without files. Add to `mod tests`:
+This task adds `process_list(string, lines, hogl_weight, metric, threshold, sort, top) -> Vec<(String,String,Scores)>` — pure over an iterator of lines so it is unit-testable without files. Add to `mod tests`:
 
 ```rust
     #[test]
@@ -820,7 +820,7 @@ Add after `sort_and_truncate`:
 fn process_list<I: Iterator<Item = String>>(
     string: &str,
     lines: I,
-    homo_weight: f64,
+    hogl_weight: f64,
     metric: Metric,
     threshold: Option<f64>,
     sort: bool,
@@ -832,7 +832,7 @@ fn process_list<I: Iterator<Item = String>>(
         if line.is_empty() {
             continue;
         }
-        let s = score_pair(string, line, homo_weight);
+        let s = score_pair(string, line, hogl_weight);
         if let Some(t) = threshold {
             if metric_value(&s, metric) > t {
                 continue;
@@ -882,7 +882,7 @@ fn main() -> ExitCode {
             .lines()
             .map_while(Result::ok);
         let results = process_list(
-            string, lines, opts.homo_weight, opts.metric,
+            string, lines, opts.hogl_weight, opts.metric,
             opts.threshold, opts.sort, opts.top,
         );
         let stdout = io::stdout();
@@ -914,7 +914,7 @@ fn main() -> ExitCode {
                     continue;
                 }
             };
-            let s = score_pair(la, lb, opts.homo_weight);
+            let s = score_pair(la, lb, opts.hogl_weight);
             if let Some(t) = opts.threshold {
                 if metric_value(&s, opts.metric) > t {
                     continue;
@@ -928,7 +928,7 @@ fn main() -> ExitCode {
     // Single-pair mode.
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
-    let s = score_pair(a, b, opts.homo_weight);
+    let s = score_pair(a, b, opts.hogl_weight);
     emit(a, b, &s, opts.json);
     if let Some(t) = opts.threshold {
         return if metric_value(&s, opts.metric) <= t {
