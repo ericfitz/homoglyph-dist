@@ -1,11 +1,11 @@
-# Homebrew formula template for sqdist (prebuilt, signed, notarized binary).
-# update-formula.sh fills in __VERSION__, __URL__, and __SHA256__ and writes the
-# result to your tap repo (e.g. homebrew-tap/Formula/sqdist.rb).
+# Formula for sqdist — installs a prebuilt, signed, notarized universal binary.
+# Generated from this template by release/update-formula.sh (do not edit the
+# rendered copy in the tap by hand; re-run update-formula.sh instead).
 class Sqdist < Formula
   desc "Fast string-distance CLI for typosquatting and homoglyph detection"
   homepage "https://github.com/ericfitz/homoglyph-dist"
-  version "__VERSION__"
   url "__URL__"
+  version "__VERSION__"
   sha256 "__SHA256__"
   license any_of: ["MIT", "Apache-2.0"]
 
@@ -17,10 +17,11 @@ class Sqdist < Formula
   end
 
   test do
-    # Identical strings => zero distance on every metric.
-    assert_match "levenshtein         0", shell_output("#{bin}/sqdist abc abc")
+    # Assert against JSON output (stable keys) rather than human-column spacing.
+    # Identical strings => zero distance.
+    assert_match '"levenshtein":0', shell_output("#{bin}/sqdist -j abc abc")
     # Cyrillic homoglyph spoof is flagged confusable_only=true.
-    assert_match "confusable_only     true",
-                 shell_output("#{bin}/sqdist paypal pаypal")
+    assert_match '"confusable_only":true',
+                 shell_output("#{bin}/sqdist -j paypal pаypal")
   end
 end
