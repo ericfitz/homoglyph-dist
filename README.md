@@ -115,6 +115,30 @@ sqdist --string paypal --list candidates.txt --sort --top 10
 sqdist --string paypal --list candidates.txt -t 0.5
 ```
 
+#### Memory usage on large lists
+
+List mode buffers its **emitted** results in memory (so `--sort`/`--top` can
+rank them) rather than streaming each line straight out. Each retained row costs
+roughly **~100 bytes of fixed overhead + ~2× the candidate's length in bytes** —
+about **190 bytes per row for 16-character names**. Peak resident memory scales
+with the number of rows you *keep*, not the file size:
+
+| Rows kept (≈16-char names) | Peak RSS |
+|---|---|
+| 10,000 | ~5 MB |
+| 100,000 | ~23 MB |
+| 1,000,000 | ~190 MB |
+
+Rough rule of thumb: `peak_MB ≈ 4 (baseline) + rows × (100 + 2 × avg_name_len) / 1e6`.
+
+This only matters past a few hundred thousand candidates, and **`-t` keeps it
+flat**: a threshold drops non-matching rows *before* they're buffered, so a
+million-line scan that alerts on only a handful stays at the ~4 MB baseline.
+Reach for `-t` (optionally with `--top`) when screening very large lists; use
+unfiltered `--sort` only when you actually want every row ranked. (Splitting a
+huge list into chunks and scanning each is also fine — results are independent
+per line.)
+
 ## Output fields
 
 - `levenshtein` / `damerau` — integer edit counts (unweighted)
