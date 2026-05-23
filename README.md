@@ -173,6 +173,19 @@ substitutions" from "fully visually confusable".
 Leetspeak substitutions (`3`→`e`, `4`→`a`) are deliberately NOT treated as
 homoglyphs because UTS #39 does not consider them visually confusable.
 
+## Installing
+
+```sh
+# Homebrew (macOS) — prebuilt, signed, notarized universal binary
+brew install ericfitz/tap/sqdist
+
+# Cargo (any platform with the Rust toolchain) — builds from source
+cargo install sqdist
+```
+
+You can also grab a signed `.pkg` installer or the universal tarball directly
+from the [latest release](https://github.com/ericfitz/homoglyph-dist/releases/latest).
+
 ## Building
 
 ```sh
