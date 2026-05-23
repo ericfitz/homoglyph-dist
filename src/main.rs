@@ -116,8 +116,7 @@ fn damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
     d[idx(n, m)]
 }
 
-#[allow(dead_code)] // TODO(task-6): remove once used by arg parsing/thresholding
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Metric {
     Homoglyph,
     Skeleton,
@@ -219,33 +218,52 @@ struct Opts {
     json: bool,
     threshold: Option<f64>,
     stdin: bool,
+    string: Option<String>,
+    list: Option<String>,
+    sort: bool,
+    top: Option<usize>,
+    metric: Metric,
+    positionals: Vec<String>,
 }
 
 fn print_usage() {
     eprintln!(
         "sqdist - typosquat / homoglyph string distance\n\n\
-         USAGE:\n    sqdist [OPTIONS] <STRING_A> <STRING_B>\n\n\
+         USAGE:\n\
+         \x20   sqdist [OPTIONS] <STRING_A> <STRING_B>      # single pair\n\
+         \x20   sqdist [OPTIONS] --stdin                    # batch: pre-paired lines\n\
+         \x20   sqdist [OPTIONS] --string <S> --list <FILE> # score <S> vs each line\n\n\
          OPTIONS:\n\
          \x20   -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
-         \x20   -t, --threshold <F>     Exit 0 if homoglyph distance <= F (alert), else 1\n\
-         \x20   -s, --stdin             Batch mode: read TAB- or comma-separated pairs from\n\
-         \x20                           stdin, emit one JSON object per line. With -t, only\n\
-         \x20                           lines at/under the threshold are emitted (alerts).\n\
+         \x20   -t, --threshold <F>     Alert (emit / exit 0) when the --metric distance <= F\n\
+         \x20   -m, --metric <M>        Distance for -t and --sort: homoglyph|skeleton (default skeleton)\n\
+         \x20   -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL\n\
+         \x20       --string <S>        (with --list) the single string to compare\n\
+         \x20       --list <FILE>       (with --string) score <S> against each non-blank line\n\
+         \x20       --sort              List mode: emit most-suspicious-first (buffers)\n\
+         \x20       --top <N>           List mode: keep only the N closest (implies --sort)\n\
          \x20   -j, --json              Emit JSON (single-pair mode)\n\
          \x20   -h, --help              This help\n\n\
-         OUTPUT (default): levenshtein, damerau, homoglyph_damerau, normalized, confusable_only\n"
+         OUTPUT FIELDS: levenshtein, damerau, homoglyph_damerau, skeleton_damerau,\n\
+         \x20             normalized, skeleton_normalized, confusable_only\n\
+         \x20  single-pair/stdin keys: a,b   |   list-mode keys: input,match\n"
     );
 }
 
-fn parse_args() -> Result<(String, String, Opts), String> {
-    let mut args = env::args().skip(1);
+fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
+    let mut args = argv.into_iter();
     let mut opts = Opts {
         hogl_weight: 0.1,
         json: false,
         threshold: None,
         stdin: false,
+        string: None,
+        list: None,
+        sort: false,
+        top: None,
+        metric: Metric::Skeleton,
+        positionals: Vec::new(),
     };
-    let mut positionals: Vec<String> = Vec::new();
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
@@ -254,6 +272,30 @@ fn parse_args() -> Result<(String, String, Opts), String> {
             }
             "-j" | "--json" => opts.json = true,
             "-s" | "--stdin" => opts.stdin = true,
+            "--sort" => opts.sort = true,
+            "--string" => {
+                opts.string = Some(args.next().ok_or("--string needs a value")?);
+            }
+            "--list" => {
+                opts.list = Some(args.next().ok_or("--list needs a value")?);
+            }
+            "--top" => {
+                let v = args.next().ok_or("--top needs a value")?;
+                let n: usize = v.parse().map_err(|_| "invalid --top")?;
+                if n == 0 {
+                    return Err("--top must be a positive integer".into());
+                }
+                opts.top = Some(n);
+                opts.sort = true;
+            }
+            "-m" | "--metric" => {
+                let v = args.next().ok_or("--metric needs a value")?;
+                opts.metric = match v.as_str() {
+                    "homoglyph" => Metric::Homoglyph,
+                    "skeleton" => Metric::Skeleton,
+                    other => return Err(format!("invalid --metric: {other} (use homoglyph|skeleton)")),
+                };
+            }
             "-w" | "--hogl-weight" => {
                 let v = args.next().ok_or("--hogl-weight needs a value")?;
                 opts.hogl_weight = v.parse().map_err(|_| "invalid --hogl-weight")?;
@@ -265,25 +307,42 @@ fn parse_args() -> Result<(String, String, Opts), String> {
             s if s.starts_with('-') && s.len() > 1 => {
                 return Err(format!("unknown option: {s}"));
             }
-            _ => positionals.push(a),
+            _ => opts.positionals.push(a),
         }
+    }
+
+    // Mode resolution: exactly one of {single-pair positionals, --stdin, --list}.
+    let list_mode = opts.list.is_some() || opts.string.is_some();
+    if list_mode {
+        if opts.list.is_none() || opts.string.is_none() {
+            return Err("--list and --string must be used together".into());
+        }
+        if opts.stdin {
+            return Err("--list cannot be combined with --stdin".into());
+        }
+        if !opts.positionals.is_empty() {
+            return Err("--list mode takes no positional arguments".into());
+        }
+        return Ok(opts);
     }
     if opts.stdin {
-        if !positionals.is_empty() {
+        if !opts.positionals.is_empty() {
             return Err("--stdin takes no positional arguments".into());
         }
-        return Ok((String::new(), String::new(), opts));
+        return Ok(opts);
     }
-    if positionals.len() != 2 {
-        return Err(format!("expected 2 string arguments, got {}", positionals.len()));
+    if opts.positionals.len() != 2 {
+        return Err(format!("expected 2 string arguments, got {}", opts.positionals.len()));
     }
-    let b = positionals.pop().unwrap();
-    let a = positionals.pop().unwrap();
-    Ok((a, b, opts))
+    Ok(opts)
+}
+
+fn parse_args() -> Result<Opts, String> {
+    parse_from(env::args().skip(1).collect())
 }
 
 fn main() -> ExitCode {
-    let (a, b, opts) = match parse_args() {
+    let opts = match parse_args() {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: {e}\n");
@@ -291,6 +350,9 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Single-pair operands (list/stdin modes ignore these).
+    let a = opts.positionals.first().cloned().unwrap_or_default();
+    let b = opts.positionals.get(1).cloned().unwrap_or_default();
 
     if opts.stdin {
         use std::io::{self, BufRead, Write};
@@ -511,5 +573,58 @@ mod tests {
         let sorted = sort_and_truncate(pairs, Metric::Skeleton, None);
         assert_eq!(sorted[0].1, "first");
         assert_eq!(sorted[1].1, "secnd");
+    }
+
+    #[test]
+    fn parse_list_mode() {
+        let o = parse_from(vec![
+            "--string".into(), "paypal".into(),
+            "--list".into(), "names.txt".into(),
+            "--metric".into(), "skeleton".into(),
+        ]).unwrap();
+        assert_eq!(o.string.as_deref(), Some("paypal"));
+        assert_eq!(o.list.as_deref(), Some("names.txt"));
+        assert_eq!(o.metric, Metric::Skeleton);
+        assert!(o.positionals.is_empty());
+    }
+
+    #[test]
+    fn parse_top_implies_sort() {
+        let o = parse_from(vec![
+            "--string".into(), "x".into(), "--list".into(), "f".into(),
+            "--top".into(), "5".into(),
+        ]).unwrap();
+        assert_eq!(o.top, Some(5));
+        assert!(o.sort);
+    }
+
+    #[test]
+    fn parse_rejects_mode_conflicts() {
+        // positionals + --list
+        assert!(parse_from(vec![
+            "a".into(), "b".into(), "--list".into(), "f".into(),
+        ]).is_err());
+        // --stdin + --list
+        assert!(parse_from(vec![
+            "--stdin".into(), "--list".into(), "f".into(),
+        ]).is_err());
+        // --list without --string
+        assert!(parse_from(vec!["--list".into(), "f".into()]).is_err());
+        // --string without --list
+        assert!(parse_from(vec!["--string".into(), "x".into()]).is_err());
+        // bad metric
+        assert!(parse_from(vec![
+            "--string".into(), "x".into(), "--list".into(), "f".into(),
+            "--metric".into(), "bogus".into(),
+        ]).is_err());
+    }
+
+    #[test]
+    fn parse_single_pair_still_works() {
+        let o = parse_from(vec!["paypal".into(), "p\u{0430}ypal".into()]).unwrap();
+        assert_eq!(o.positionals.len(), 2);
+        assert!(o.list.is_none());
+        assert!(!o.stdin);
+        assert_eq!(o.metric, Metric::Skeleton); // default
     }
 }
