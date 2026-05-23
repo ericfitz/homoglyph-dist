@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Shared configuration for the sqdist release scripts.
+# Sourced by the build/sign/notarize/release scripts; edit values here only.
+# The vars below are consumed by the sourcing scripts, not this file (SC2034).
+# shellcheck disable=SC2034
+set -euo pipefail
+
+# --- Project ---
+BIN_NAME="sqdist"
+# Repo "owner/name" used for GitHub Releases and the Homebrew formula URL.
+GH_REPO="ericfitz/homoglyph-dist"
+
+# --- Code signing (Developer ID Application) ---
+# Full identity string OR the SHA-1 hash from `security find-identity -v -p codesigning`.
+SIGN_IDENTITY="Developer ID Application: Robert Fitzgerald (796T45968D)"
+TEAM_ID="796T45968D"
+
+# --- Notarization ---
+# Name of the keychain profile created with:
+#   xcrun notarytool store-credentials sqdist-notary \
+#     --apple-id "<your-apple-id>" --team-id 796T45968D --password "<app-specific-password>"
+NOTARY_PROFILE="sqdist-notary"
+
+# --- Build targets (universal binary) ---
+TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
+
+# --- Layout (resolved relative to repo root) ---
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DIST_DIR="${REPO_ROOT}/dist"          # build outputs (gitignored)
+UNIVERSAL_BIN="${DIST_DIR}/${BIN_NAME}"
