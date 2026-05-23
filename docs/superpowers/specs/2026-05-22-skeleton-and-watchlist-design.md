@@ -63,37 +63,52 @@ Worked example — `rnicrosoft` vs `microsoft`:
 
 ### Flags
 
-- `-f, --file <PATH>` — the multi-line side; one candidate string per line.
-  Each non-blank line is scored against the single CLI positional argument.
-  Blank/whitespace-only lines skipped; surrounding whitespace trimmed. There is
-  no field-splitting (unlike `--stdin`), so there is no "malformed line" case.
-  Mutually exclusive with `--stdin`. Requires exactly one positional argument.
-- `-r, --reverse` — swap the `a`/`b` roles in output. Default: CLI arg is `a`
-  (reference), each file line is `b` (candidate). With `--reverse`: file line is
-  `a`, CLI arg is `b` (the "does this candidate impersonate any of my brands?"
-  direction).
+File mode takes **no positional arguments**. It is selected by `--list` and
+requires `--string`:
+
+- `--string <S>` — the single string to compare against every list entry.
+- `--list <PATH>` — file with one candidate string per line. Each non-blank line
+  is scored against `--string`. Blank/whitespace-only lines skipped; surrounding
+  whitespace trimmed. There is no field-splitting (unlike `--stdin`), so there
+  is no "malformed line" case. Mutually exclusive with `--stdin` and with
+  positional single-pair args.
 - `--sort` — buffer all results and emit ordered by the active `--metric`
   distance ascending (most suspicious first).
 - `--top <N>` — implies `--sort`; emit only the N closest results.
 
+There is no direction/`--reverse` flag: the distance is symmetric, so direction
+only ever affected labels. Neutral role labels (`input` = `--string`, `match` =
+the list line) make direction a non-question. Whether the user is "screening
+candidates" or "checking a suspect against a watchlist" is the same computation;
+intent lives in their threshold choice, not in flag vocabulary.
+
 ### Output
 
-Batch modes (`--stdin`, `--file`) always emit **JSONL** (one JSON object per
-line, newline-separated, no enclosing array). `--sort`/`--top` emit the same
-JSONL, just reordered — never a JSON array. Single-pair mode (`-j`) emits one
-JSON object (not JSONL).
+File mode emits **JSONL** with keys `input` (= `--string`) and `match` (= the
+list line):
 
-`-t` threshold filtering applies as in `--stdin`: only emit pairs whose active
+```
+{"input":"paypal","match":"paypa1","levenshtein":1,...,"confusable_only":false}
+```
+
+`--sort`/`--top` emit the same JSONL, just reordered — never a JSON array.
+
+Single-pair mode (`-j`) and `--stdin` are unchanged and keep `a`/`b` keys. This
+is two key schemes across modes by design: positional/pre-paired args are
+genuinely unlabeled (`a`/`b` is honest), while file mode has a clear single-vs-
+many asymmetry worth naming (`input`/`match`).
+
+`-t` threshold filtering applies as in `--stdin`: only emit results whose active
 `--metric` distance is ≤ the threshold.
 
 ### Invocation examples
 
 ```sh
-# screen candidates against one known-good name (reference vs candidates)
-sqdist --file candidates.txt paypal -t 0.5
+# screen a list of candidate names against one known-good name
+sqdist --string paypal --list candidates.txt -t 0.5
 
-# check one new package against a brand watchlist (candidate vs watchlist)
-sqdist --file brands.txt newpkg-name --reverse --sort --top 5
+# rank a list against one string, most suspicious first, top 5
+sqdist --string newpkg-name --list brands.txt --sort --top 5
 ```
 
 ## Cross-cutting
@@ -107,14 +122,15 @@ always emitted); only which one is used for filtering/sorting.
 
 ### Mode matrix
 
-| Mode | Trigger | Pairing | Output |
+| Mode | Trigger | Pairing | Output keys |
 |---|---|---|---|
-| single pair | two positionals | the two args | human (default) or one JSON (`-j`) |
-| stdin batch | `-s/--stdin` | pre-paired lines (tab/comma) | JSONL |
-| file/watchlist | `-f/--file` | each line × one positional | JSONL |
+| single pair | two positionals | the two args | `a`/`b` — human (default) or one JSON (`-j`) |
+| stdin batch | `-s/--stdin` | pre-paired lines (tab/comma) | `a`/`b` — JSONL |
+| file/watchlist | `--list <file>` | each line × `--string` | `input`/`match` — JSONL |
 
-Errors: `--stdin` + `--file` together; `--file` with ≠1 positional; `--top`
-without a positive integer.
+Errors: more than one mode selected (positionals + `--stdin`/`--list`, or
+`--stdin` + `--list`); `--list` without `--string` (or vice versa); positionals
+given with `--list`/`--stdin`; `--top` without a positive integer.
 
 ## Refactor for testability
 
@@ -125,7 +141,9 @@ Extract pure functions so `main()` is a thin I/O wrapper:
 - `metric_value(&Scores, Metric) -> f64` — picks the active distance
 - `sort_and_truncate(Vec<(String, String, Scores)>, Metric, top: Option<usize>)`
   — pure ordering/truncation over a vector
-- JSONL serialization of one result as a function returning `String`
+- JSONL serialization of one result as a function returning `String`, taking the
+  two key names (`("a","b")` or `("input","match")`) as parameters so all modes
+  share one serializer
 
 `main()` handles arg parsing, file/stdin reading, and writing; all logic above
 is unit-tested directly in the `#[cfg(test)]` module. No process spawning, no
@@ -157,8 +175,8 @@ Unit tests (in `src/main.rs` test module):
 ## Docs to update
 
 - README: rewrite the "Known limitation: multi-character homoglyphs" section
-  (now solved); document `--file`, `--reverse`, `--sort`, `--top`, `--metric`,
-  the new fields, and clarify JSONL.
+  (now solved); document `--string`/`--list`, `--sort`, `--top`, `--metric`,
+  the new fields, the `input`/`match` keys, and clarify JSONL.
 - CLAUDE.md: update the "known limitation" framing, the output contract, and the
   mode matrix.
 - `sqdist --help` text.
