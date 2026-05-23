@@ -833,6 +833,18 @@ mod tests {
     }
 
     #[test]
+    fn vv_w_and_cl_d_are_not_uts39_confusables() {
+        // UTS#39 does NOT define vv->w / cl->d (their RHS are not source code
+        // points). These pin the documented gap; update deliberately if a
+        // supplemental confusable table is ever added.
+        assert_ne!(skeleton("vv"), skeleton("w"));
+        assert!(!score_pair("devflovv", "devflow", 0.1).confusable_only);
+        assert_ne!(skeleton("cl"), skeleton("d"));
+        // m->rn IS defined, for contrast.
+        assert_eq!(skeleton("m"), "rn");
+    }
+
+    #[test]
     fn skeleton_damerau_catches_multichar_spoof() {
         let s = score_pair("rnicrosoft", "microsoft", 0.1);
         // Per-char metric can't align "rn" to "m", so it costs real edits.

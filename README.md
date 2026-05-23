@@ -228,23 +228,36 @@ This verdict helps distinguish attacks from honest typos and appears only in sin
 
 ## Multi-character homoglyphs
 
-Multi-character visual confusables ARE detected via full UTS#39
+Some multi-character visual confusables are detected via full UTS#39
 skeletonization — each string is reduced to its skeleton (every code point
 mapped through the confusables table and concatenated) before measuring
-distance:
+distance. The classic example is the letter **m**, whose UTS#39 skeleton is
+`rn`, so a spoof that swaps one for the other collapses to a zero-distance match:
 
-- `rn` → `m` (`rnicrosoft` vs `microsoft`)
-- `vv` → `w`
-- `cl` → `d`
+- `rn` ↔ `m` (`rnicrosoft` vs `microsoft`) — **detected**
 
-These surface in the `skeleton_damerau` field (~0 for a pure multi-char spoof)
-and set `confusable_only` to `true`, even when the strings differ in length.
+This surfaces in the `skeleton_damerau` field (~0 for a pure multi-char spoof)
+and sets `confusable_only` to `true`, even when the strings differ in length.
 The `homoglyph_damerau` field uses per-character weighting and does NOT collapse
 multi-char sequences, so comparing the two fields distinguishes "a few homoglyph
 substitutions" from "fully visually confusable".
 
-Leetspeak substitutions (`3`→`e`, `4`→`a`) are deliberately NOT treated as
-homoglyphs because UTS #39 does not consider them visually confusable.
+### What is *not* caught
+
+sqdist only knows the confusables that **UTS#39 itself defines**. Some
+visually-plausible multi-character spoofs are **not** in the Unicode data and
+are therefore reported as ordinary edits (`confusable_only` false), e.g.:
+
+- `vv` ≈ `w`
+- `cl` ≈ `d`
+- `nn` ≈ `m`
+
+UTS#39 keys its multi-character skeletons on a small set of single code points
+(among ASCII letters, essentially just `m` → `rn`); it does not provide the
+reverse `vv → w` style mappings. Supplementing the official data with a curated
+table of these pairs is a candidate future enhancement. Leetspeak substitutions
+(`3`→`e`, `4`→`a`) are deliberately excluded — UTS#39 does not consider them
+visually confusable.
 
 ## Installing
 

@@ -46,14 +46,19 @@ Two characters are confusable when they share the same **skeleton** under UTS #3
 ### Multi-character skeletonization (implemented)
 
 `skeleton(s: &str)` builds the full UTS#39 skeleton of a string (each code point
-mapped through the confusables table and concatenated), so multi-character
-confusables ARE caught: `rn`↔`m`, `vv`↔`w`, `cl`↔`d`. These surface in
+mapped through the confusables table and concatenated), so the multi-character
+confusables that UTS#39 *defines* ARE caught. Among ASCII letters this is
+essentially just `m` ↔ `rn` (the skeleton of `m` is `rn`). These surface in
 `skeleton_damerau` (≈0 for a pure multi-char spoof) and set `confusable_only`
 to `true` (defined as `a != b && skeleton(a) == skeleton(b)`, no equal-length
-requirement). The per-char `homoglyph_damerau` metric does NOT collapse
-multi-char sequences — keeping both lets a caller distinguish a few homoglyph
-substitutions from a fully-confusable string. Leetspeak (`3`→`e`) is still
-intentionally excluded (UTS #39 does not treat it as visually confusable).
+requirement). IMPORTANT: UTS#39 does NOT define reverse mappings like `vv`→`w`,
+`cl`→`d`, or `nn`→`m` (their right-hand sides are not source code points in the
+table), so those spoofs are NOT caught and report `confusable_only` false — a
+known gap, candidate for a future curated supplemental table. The per-char
+`homoglyph_damerau` metric does NOT collapse multi-char sequences — keeping both
+lets a caller distinguish a few homoglyph substitutions from a fully-confusable
+string. Leetspeak (`3`→`e`) is intentionally excluded (UTS #39 does not treat it
+as visually confusable).
 
 ## Regenerating the confusables table
 
