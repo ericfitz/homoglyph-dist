@@ -194,6 +194,12 @@ fn process_list<I: Iterator<Item = String>>(
     results
 }
 
+/// Batch-mode success rule: with a threshold, success requires at least one
+/// match; without a threshold, batch always succeeds.
+fn batch_matched_ok(threshold: Option<f64>, matched: bool) -> bool {
+    threshold.is_none() || matched
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Field {
     Levenshtein,
@@ -317,7 +323,6 @@ fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     }
 }
 
-#[allow(dead_code)] // TODO(task-6): remove once used by single-pair output
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Verdict {
     Identical,
@@ -326,7 +331,6 @@ enum Verdict {
 }
 
 impl Verdict {
-    #[allow(dead_code)] // TODO(task-6): remove once used by single-pair output
     fn tag(self) -> &'static str {
         match self {
             Verdict::Identical => "IDENTICAL",
@@ -339,7 +343,6 @@ impl Verdict {
 /// Classify a scored pair into a human verdict + explanation sentence.
 /// `len_a`/`len_b` are character counts; `len_tolerance` bounds the
 /// length-difference ratio allowed for a spoof verdict (default 0.25).
-#[allow(dead_code)] // TODO(task-6): remove once used by single-pair output
 fn verdict(s: &Scores, len_a: usize, len_b: usize, len_tolerance: f64) -> (Verdict, String) {
     // dam == 0 means the strings are byte-identical.
     if s.dam == 0 {
@@ -447,9 +450,7 @@ struct Opts {
     top: Option<usize>,
     metric: Metric,
     positionals: Vec<String>,
-    #[allow(dead_code)] // TODO(task-6): remove once read by main()
     fields: Option<Vec<Field>>,
-    #[allow(dead_code)] // TODO(task-6): remove once read by main()
     len_tolerance: f64,
 }
 
@@ -621,6 +622,7 @@ fn main() -> ExitCode {
         let lines = io::BufReader::new(file).lines().map_while(Result::ok);
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
+        let mut matched = false;
         if opts.sort || opts.top.is_some() {
             // Ranking requires all rows up front: buffer, sort/truncate, emit.
             let results = process_list(
@@ -632,8 +634,13 @@ fn main() -> ExitCode {
                 opts.sort,
                 opts.top,
             );
+            matched = !results.is_empty();
             for (a, b, s) in &results {
-                let _ = writeln!(out, "{}", result_json(a, b, s, ("input", "match"), None));
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    result_json(a, b, s, ("input", "match"), opts.fields.as_deref())
+                );
             }
         } else {
             // No ranking: stream each kept row straight out, no buffering.
@@ -641,11 +648,20 @@ fn main() -> ExitCode {
                 if let Some((a, b, s)) =
                     score_candidate(string, &raw, opts.hogl_weight, opts.metric, opts.threshold)
                 {
-                    let _ = writeln!(out, "{}", result_json(&a, &b, &s, ("input", "match"), None));
+                    matched = true;
+                    let _ = writeln!(
+                        out,
+                        "{}",
+                        result_json(&a, &b, &s, ("input", "match"), opts.fields.as_deref())
+                    );
                 }
             }
         }
-        return ExitCode::SUCCESS;
+        return if batch_matched_ok(opts.threshold, matched) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
 
     // Stdin batch mode: pre-paired lines, a/b JSONL.
@@ -653,6 +669,7 @@ fn main() -> ExitCode {
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
+        let mut matched = false;
         for line in stdin.lock().lines() {
             let line = match line {
                 Ok(l) => l,
@@ -675,16 +692,31 @@ fn main() -> ExitCode {
                     continue;
                 }
             }
-            let _ = writeln!(out, "{}", result_json(la, lb, &s, ("a", "b"), None));
+            matched = true;
+            let _ = writeln!(
+                out,
+                "{}",
+                result_json(la, lb, &s, ("a", "b"), opts.fields.as_deref())
+            );
         }
-        return ExitCode::SUCCESS;
+        return if batch_matched_ok(opts.threshold, matched) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
 
     // Single-pair mode.
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
     let s = score_pair(a, b, opts.hogl_weight);
-    emit(a, b, &s, opts.json, None);
+    emit(a, b, &s, opts.json, opts.fields.as_deref());
+    if !opts.json {
+        let la = a.chars().count();
+        let lb = b.chars().count();
+        let (cat, msg) = verdict(&s, la, lb, opts.len_tolerance);
+        println!("\n[{}] {}", cat.tag(), msg);
+    }
     if let Some(t) = opts.threshold {
         return if metric_value(&s, opts.metric) <= t {
             ExitCode::SUCCESS
@@ -1226,5 +1258,14 @@ mod tests {
             "b".into(),
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn batch_exit_codes() {
+        // batch_matched_ok: no threshold => always ok; with threshold => ok iff matched.
+        assert!(batch_matched_ok(None, false));
+        assert!(batch_matched_ok(None, true));
+        assert!(batch_matched_ok(Some(0.5), true));
+        assert!(!batch_matched_ok(Some(0.5), false));
     }
 }
