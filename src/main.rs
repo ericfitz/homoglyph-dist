@@ -155,12 +155,8 @@ struct Scores {
     lev: u64,
     dam: u64,
     hogl: f64,      // per-char weighted Damerau (single-char confusables)
-    // TODO(task-5): remove once emitted
-    #[allow(dead_code)]
     skel: f64,      // Damerau on full skeletons (multi-char aware)
     norm: f64,      // hogl / max(len)
-    // TODO(task-5): remove once emitted
-    #[allow(dead_code)]
     skel_norm: f64, // skel / max(skeleton len)
     confusable_only: bool,
 }
@@ -193,18 +189,28 @@ fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     }
 }
 
+/// One JSONL record for a scored pair, using the given key names for the two
+/// strings (e.g. ("a","b") for single-pair/stdin, ("input","match") for --list).
+fn result_json(a: &str, b: &str, s: &Scores, keys: (&str, &str)) -> String {
+    format!(
+        "{{\"{}\":{:?},\"{}\":{:?},\"levenshtein\":{},\"damerau\":{},\
+         \"homoglyph_damerau\":{},\"skeleton_damerau\":{},\
+         \"normalized\":{:.4},\"skeleton_normalized\":{:.4},\"confusable_only\":{}}}",
+        keys.0, a, keys.1, b, s.lev, s.dam, s.hogl, s.skel, s.norm, s.skel_norm, s.confusable_only
+    )
+}
+
 fn emit(a: &str, b: &str, s: &Scores, json: bool) {
     if json {
-        println!(
-            "{{\"a\":{:?},\"b\":{:?},\"levenshtein\":{},\"damerau\":{},\"homoglyph_damerau\":{},\"normalized\":{:.4},\"confusable_only\":{}}}",
-            a, b, s.lev, s.dam, s.hogl, s.norm, s.confusable_only
-        );
+        println!("{}", result_json(a, b, s, ("a", "b")));
     } else {
-        println!("levenshtein         {}", s.lev);
-        println!("damerau             {}", s.dam);
-        println!("homoglyph_damerau   {}", s.hogl);
-        println!("normalized          {:.4}", s.norm);
-        println!("confusable_only     {}", s.confusable_only);
+        println!("levenshtein          {}", s.lev);
+        println!("damerau              {}", s.dam);
+        println!("homoglyph_damerau    {}", s.hogl);
+        println!("skeleton_damerau     {}", s.skel);
+        println!("normalized           {:.4}", s.norm);
+        println!("skeleton_normalized  {:.4}", s.skel_norm);
+        println!("confusable_only      {}", s.confusable_only);
     }
 }
 
@@ -473,6 +479,22 @@ mod tests {
         let top1 = sort_and_truncate(pairs2, Metric::Skeleton, Some(1));
         assert_eq!(top1.len(), 1);
         assert_eq!(top1[0].1, "abc"); // closest kept
+    }
+
+    #[test]
+    fn result_json_uses_given_keys_and_all_fields() {
+        let s = score_pair("paypal", "p\u{0430}ypal", 0.1);
+        let line = result_json("paypal", "p\u{0430}ypal", &s, ("a", "b"));
+        assert!(line.starts_with("{\"a\":\"paypal\""));
+        assert!(line.contains("\"homoglyph_damerau\":"));
+        assert!(line.contains("\"skeleton_damerau\":"));
+        assert!(line.contains("\"normalized\":"));
+        assert!(line.contains("\"skeleton_normalized\":"));
+        assert!(line.contains("\"confusable_only\":true"));
+
+        // File-mode keys.
+        let line2 = result_json("paypal", "p\u{0430}ypal", &s, ("input", "match"));
+        assert!(line2.starts_with("{\"input\":\"paypal\",\"match\":"));
     }
 
     #[test]
