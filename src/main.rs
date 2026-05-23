@@ -31,11 +31,11 @@ fn confusable(a: char, b: char) -> bool {
 }
 
 /// Substitution cost under the chosen model.
-fn sub_cost(a: char, b: char, homoglyph: bool, homo_weight: f64) -> f64 {
+fn sub_cost(a: char, b: char, homoglyph: bool, hogl_weight: f64) -> f64 {
     if a == b {
         0.0
     } else if homoglyph && confusable(a, b) {
-        homo_weight
+        hogl_weight
     } else {
         1.0
     }
@@ -104,17 +104,17 @@ fn damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
 struct Scores {
     lev: u64,
     dam: u64,
-    homo: f64,
+    hogl: f64,
     norm: f64,
     confusable_only: bool,
 }
 
-fn score_pair(a: &str, b: &str, homo_weight: f64) -> Scores {
+fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     let ca: Vec<char> = a.chars().collect();
     let cb: Vec<char> = b.chars().collect();
     let lev = levenshtein(&ca, &cb, false, 0.0);
     let dam = damerau(&ca, &cb, false, 0.0);
-    let homo = damerau(&ca, &cb, true, homo_weight);
+    let hogl = damerau(&ca, &cb, true, hogl_weight);
     let maxlen = ca.len().max(cb.len()).max(1) as f64;
     let confusable_only = a != b
         && ca.len() == cb.len()
@@ -122,8 +122,8 @@ fn score_pair(a: &str, b: &str, homo_weight: f64) -> Scores {
     Scores {
         lev: lev as u64,
         dam: dam as u64,
-        homo,
-        norm: homo / maxlen,
+        hogl,
+        norm: hogl / maxlen,
         confusable_only,
     }
 }
@@ -132,19 +132,19 @@ fn emit(a: &str, b: &str, s: &Scores, json: bool) {
     if json {
         println!(
             "{{\"a\":{:?},\"b\":{:?},\"levenshtein\":{},\"damerau\":{},\"homoglyph_damerau\":{},\"normalized\":{:.4},\"confusable_only\":{}}}",
-            a, b, s.lev, s.dam, s.homo, s.norm, s.confusable_only
+            a, b, s.lev, s.dam, s.hogl, s.norm, s.confusable_only
         );
     } else {
         println!("levenshtein         {}", s.lev);
         println!("damerau             {}", s.dam);
-        println!("homoglyph_damerau   {}", s.homo);
+        println!("homoglyph_damerau   {}", s.hogl);
         println!("normalized          {:.4}", s.norm);
         println!("confusable_only     {}", s.confusable_only);
     }
 }
 
 struct Opts {
-    homo_weight: f64,
+    hogl_weight: f64,
     json: bool,
     threshold: Option<f64>,
     stdin: bool,
@@ -155,7 +155,7 @@ fn print_usage() {
         "sqdist - typosquat / homoglyph string distance\n\n\
          USAGE:\n    sqdist [OPTIONS] <STRING_A> <STRING_B>\n\n\
          OPTIONS:\n\
-         \x20   -w, --homo-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
+         \x20   -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
          \x20   -t, --threshold <F>     Exit 0 if homoglyph distance <= F (alert), else 1\n\
          \x20   -s, --stdin             Batch mode: read TAB- or comma-separated pairs from\n\
          \x20                           stdin, emit one JSON object per line. With -t, only\n\
@@ -169,7 +169,7 @@ fn print_usage() {
 fn parse_args() -> Result<(String, String, Opts), String> {
     let mut args = env::args().skip(1);
     let mut opts = Opts {
-        homo_weight: 0.1,
+        hogl_weight: 0.1,
         json: false,
         threshold: None,
         stdin: false,
@@ -183,9 +183,9 @@ fn parse_args() -> Result<(String, String, Opts), String> {
             }
             "-j" | "--json" => opts.json = true,
             "-s" | "--stdin" => opts.stdin = true,
-            "-w" | "--homo-weight" => {
-                let v = args.next().ok_or("--homo-weight needs a value")?;
-                opts.homo_weight = v.parse().map_err(|_| "invalid --homo-weight")?;
+            "-w" | "--hogl-weight" => {
+                let v = args.next().ok_or("--hogl-weight needs a value")?;
+                opts.hogl_weight = v.parse().map_err(|_| "invalid --hogl-weight")?;
             }
             "-t" | "--threshold" => {
                 let v = args.next().ok_or("--threshold needs a value")?;
@@ -243,28 +243,28 @@ fn main() -> ExitCode {
                     continue;
                 }
             };
-            let s = score_pair(la, lb, opts.homo_weight);
+            let s = score_pair(la, lb, opts.hogl_weight);
             // In stdin mode we always emit JSON lines (one per pair) for easy parsing,
             // optionally filtered by threshold.
             if let Some(t) = opts.threshold {
-                if s.homo > t {
+                if s.hogl > t {
                     continue; // only emit alerts at/under threshold
                 }
             }
             let _ = writeln!(
                 out,
                 "{{\"a\":{:?},\"b\":{:?},\"levenshtein\":{},\"damerau\":{},\"homoglyph_damerau\":{},\"normalized\":{:.4},\"confusable_only\":{}}}",
-                la, lb, s.lev, s.dam, s.homo, s.norm, s.confusable_only
+                la, lb, s.lev, s.dam, s.hogl, s.norm, s.confusable_only
             );
         }
         return ExitCode::SUCCESS;
     }
 
-    let s = score_pair(&a, &b, opts.homo_weight);
+    let s = score_pair(&a, &b, opts.hogl_weight);
     emit(&a, &b, &s, opts.json);
 
     if let Some(t) = opts.threshold {
-        return if s.homo <= t { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        return if s.hogl <= t { ExitCode::SUCCESS } else { ExitCode::FAILURE };
     }
     ExitCode::SUCCESS
 }
