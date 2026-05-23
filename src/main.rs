@@ -30,6 +30,23 @@ fn confusable(a: char, b: char) -> bool {
     sa == sb
 }
 
+/// UTS#39 skeleton of a string: map each code point through the confusables
+/// table (or pass it through unchanged), concatenating the results. Single,
+/// non-recursive pass — the table targets are already in canonical form.
+// TODO(task-2): remove #[allow(dead_code)] once skeleton() is called from score_pair.
+#[allow(dead_code)]
+fn skeleton(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut buf = [0u8; 4];
+    for c in s.chars() {
+        match skeleton_of(c) {
+            Some(sk) => out.push_str(sk),
+            None => out.push_str(c.encode_utf8(&mut buf)),
+        }
+    }
+    out
+}
+
 /// Substitution cost under the chosen model.
 fn sub_cost(a: char, b: char, homoglyph: bool, hogl_weight: f64) -> f64 {
     if a == b {
@@ -322,5 +339,30 @@ mod tests {
     #[test]
     fn identical_is_zero_everywhere() {
         assert_eq!(damerau(&cv("abc"), &cv("abc"), true, 0.1), 0.0);
+    }
+
+    #[test]
+    fn skeleton_maps_multichar() {
+        // UTS#39: the skeleton of 'm' is "rn", so "microsoft" and "rnicrosoft"
+        // share a skeleton.
+        assert_eq!(skeleton("microsoft"), skeleton("rnicrosoft"));
+        assert_eq!(skeleton("microsoft"), "rnicrosoft");
+    }
+
+    #[test]
+    fn skeleton_is_idempotent() {
+        for s in ["microsoft", "paypal", "vvallet", "g\u{43E}\u{43E}gle", "abc123"] {
+            assert_eq!(skeleton(&skeleton(s)), skeleton(s), "not idempotent for {s}");
+        }
+    }
+
+    #[test]
+    fn skeleton_collapses_homoglyphs() {
+        // Cyrillic а -> same skeleton as Latin paypal.
+        assert_eq!(skeleton("p\u{0430}ypal"), skeleton("paypal"));
+        // Unmapped chars pass through unchanged.
+        assert_eq!(skeleton("xyz"), "xyz");
+        // Empty string.
+        assert_eq!(skeleton(""), "");
     }
 }
