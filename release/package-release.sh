@@ -23,12 +23,23 @@ echo "==> Computing SHA-256 (needed for the Homebrew formula)"
 SHA="$(shasum -a 256 "$TARBALL" | awk '{print $1}')"
 echo "$SHA  $(basename "$TARBALL")" | tee "${TARBALL}.sha256"
 
+# Optionally attach the .pkg installer (built by build-pkg.sh) for manual
+# downloads. Homebrew uses only the tarball; the .pkg is a convenience artifact.
+ASSETS=("$TARBALL" "${TARBALL}.sha256")
+PKG="${DIST_DIR}/${BIN_NAME}-${TAG}-macos.pkg"
+if [[ -f "$PKG" ]]; then
+    echo "==> Including installer $PKG"
+    ASSETS+=("$PKG")
+else
+    echo "    (no .pkg found — run ./release/build-pkg.sh first to include one)"
+fi
+
 echo "==> Creating GitHub Release $TAG"
 gh release create "$TAG" \
     --repo "$GH_REPO" \
     --title "$TAG" \
     --generate-notes \
-    "$TARBALL" "${TARBALL}.sha256"
+    "${ASSETS[@]}"
 
 cat <<EOF
 

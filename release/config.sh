@@ -10,10 +10,16 @@ BIN_NAME="sqdist"
 # Repo "owner/name" used for GitHub Releases and the Homebrew formula URL.
 GH_REPO="ericfitz/homoglyph-dist"
 
-# --- Code signing (Developer ID Application) ---
-# Full identity string OR the SHA-1 hash from `security find-identity -v -p codesigning`.
+# --- Code signing ---
+# Developer ID Application: signs the Mach-O binary.
+# Developer ID Installer:   signs the .pkg installer (a different cert).
+# Use the full identity string OR the SHA-1 hash from `security find-identity -v`.
 SIGN_IDENTITY="Developer ID Application: Robert Fitzgerald (796T45968D)"
+INSTALLER_IDENTITY="Developer ID Installer: Robert Fitzgerald (796T45968D)"
 TEAM_ID="796T45968D"
+
+# Reverse-DNS identifier for the .pkg.
+PKG_IDENTIFIER="com.ericfitz.sqdist"
 
 # --- Notarization ---
 # Name of the keychain profile created with:

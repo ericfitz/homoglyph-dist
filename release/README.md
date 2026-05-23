@@ -26,15 +26,29 @@ land in `dist/` (gitignored). Edit [config.sh](config.sh) for identities/paths.
 
 ```sh
 ./release/build.sh                    # universal arm64+x86_64 -> dist/sqdist
-./release/sign-notarize.sh            # Developer ID sign + Apple notarization
-./release/package-release.sh          # tarball + sha256 + GitHub Release (tag from Cargo.toml)
+./release/sign-notarize.sh            # Developer ID sign + notarize the binary
+./release/build-pkg.sh                # signed+notarized+stapled .pkg installer (optional)
+./release/package-release.sh          # tarball + sha256 (+ .pkg) + GitHub Release
 # copy the printed sha256, then:
 TAP_DIR=~/path/to/homebrew-tap ./release/update-formula.sh v0.1.0 <sha256>
 cd ~/path/to/homebrew-tap && git add -A && git commit -m "sqdist 0.1.0" && git push
 ```
 
 Bump the version in `Cargo.toml` before building a new release; the tag defaults
-to `v<that version>`.
+to `v<that version>`. `build-pkg.sh` is optional — skip it and `package-release.sh`
+simply omits the installer.
+
+## Two artifacts, two audiences
+
+A release ships both, built from the same signed universal binary:
+
+| Artifact | For | Why this form |
+|---|---|---|
+| `sqdist-vX.Y.Z-macos-universal.tar.gz` | **Homebrew** | `brew` owns install/uninstall and strips quarantine; a raw binary is correct. A `.pkg` here would be an anti-pattern (writes outside Homebrew's prefix, can't be cleanly uninstalled). |
+| `sqdist-vX.Y.Z-macos.pkg` | **manual download** | A bare CLI binary can't be stapled, so a manual download could hit Gatekeeper. A `.pkg` **can** be stapled (`stapler`), so it installs offline with zero friction. Installs to `/usr/local/bin`. |
+
+The Homebrew formula points only at the `.tar.gz`. The `.pkg` is a convenience
+for users who don't use Homebrew; it is never referenced by the formula.
 
 ## Why these steps
 
