@@ -116,6 +116,22 @@ fn damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
     d[idx(n, m)]
 }
 
+#[allow(dead_code)] // TODO(task-6): remove once used by arg parsing/thresholding
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Metric {
+    Homoglyph,
+    Skeleton,
+}
+
+/// The distance used for thresholding/sorting, per the chosen metric.
+#[allow(dead_code)] // TODO(task-6): remove once used by arg parsing/thresholding
+fn metric_value(s: &Scores, m: Metric) -> f64 {
+    match m {
+        Metric::Homoglyph => s.hogl,
+        Metric::Skeleton => s.skel,
+    }
+}
+
 struct Scores {
     lev: u64,
     dam: u64,
@@ -405,5 +421,12 @@ mod tests {
         let s = score_pair("", "", 0.1);
         assert_eq!(s.skel_norm, 0.0);
         assert!(!s.confusable_only);
+    }
+
+    #[test]
+    fn metric_value_selects_field() {
+        let s = score_pair("rnicrosoft", "microsoft", 0.1);
+        assert_eq!(metric_value(&s, Metric::Homoglyph), s.hogl);
+        assert_eq!(metric_value(&s, Metric::Skeleton), s.skel);
     }
 }
