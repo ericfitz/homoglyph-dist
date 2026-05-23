@@ -47,12 +47,15 @@ mutually confusable).
 ## Why the homoglyph weight matters
 
 A homoglyph spoof and a benign typo can have **identical** Levenshtein/Damerau
-distance. The weighted metric separates them:
+distance. The weighted metric separates them — and the skeleton column also
+collapses multi-char confusables (`rn`→`m`) that the per-character homoglyph
+column misses:
 
 ```
-                      lev  damerau  homoglyph  confusable_only
-paypal vs pаypal       1      1        0.1          true     <- SPOOF
-google vs gogle        1      1        1.0          false    <- benign typo
+                       lev  damerau  homoglyph  skeleton  confusable_only
+paypal vs pаypal        1      1        0.1        0          true   <- homoglyph spoof
+rnicrosoft vs microsoft 2      2        2          0          true   <- multi-char spoof
+google vs gogle         1      1        1          1          false  <- benign typo
 ```
 
 Set a threshold (e.g. `-t 0.5`) to alert only on the spoofs.
@@ -60,16 +63,21 @@ Set a threshold (e.g. `-t 0.5`) to alert only on the spoofs.
 ## Usage
 
 ```
-sqdist [OPTIONS] <STRING_A> <STRING_B>
+sqdist [OPTIONS] <STRING_A> <STRING_B>      # single pair
+sqdist [OPTIONS] --stdin                    # batch: pre-paired lines
+sqdist [OPTIONS] --string <S> --list <FILE> # score <S> vs each line
 
 OPTIONS:
-    -w, --homo-weight <F>   Cost of a homoglyph substitution (default 0.1)
-    -t, --threshold <F>     Exit 0 if homoglyph distance <= F (alert), else exit 1
-    -s, --stdin             Batch mode: read TAB- or comma-separated pairs from
-                            stdin, emit one JSON object per line. With -t, only
-                            lines at/under the threshold are emitted (alerts).
+    -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)
+    -t, --threshold <F>     Alert (emit / exit 0) when the --metric distance <= F
+    -m, --metric <M>        Distance for -t and --sort: homoglyph|skeleton (default skeleton)
+    -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL
+        --string <S>        (with --list) the single string to compare
+        --list <FILE>       (with --string) score <S> against each non-blank line
+        --sort              List mode: emit most-suspicious-first (buffers)
+        --top <N>           List mode: keep only the N closest (implies --sort)
     -j, --json              Emit JSON (single-pair mode)
-    -h, --help              Help
+    -h, --help              This help
 ```
 
 ### Single pair
@@ -94,35 +102,55 @@ Process-spawn overhead is ~1 ms; the distance computation itself is
 sub-microsecond for typical identifier-length strings, so batch mode keeps
 everything in one process for high throughput.
 
+### Watchlist mode (one string vs. a file)
+
+Score a single name against every line of a candidates file — closer to how
+you'd screen registry/Artifactory package names against a known-good name:
+
+```sh
+# emit JSONL (input/match keys), most-suspicious first, top 10
+sqdist --string paypal --list candidates.txt --sort --top 10
+
+# alert-only: skeleton distance at/under the threshold
+sqdist --string paypal --list candidates.txt -t 0.5
+```
+
 ## Output fields
 
 - `levenshtein` / `damerau` — integer edit counts (unweighted)
-- `homoglyph_damerau` — Damerau distance where confusable substitutions cost `--homo-weight`
+- `homoglyph_damerau` — Damerau distance where confusable substitutions cost `--hogl-weight`
 - `normalized` — `homoglyph_damerau / max(len_a, len_b)`, a 0–1 similarity-ish score for ranking
+- `skeleton_damerau` — Damerau distance computed on the two strings' full UTS#39 skeletons; ~0 when they are visually identical including multi-char confusables.
+- `skeleton_normalized` — `skeleton_damerau / max(skeleton_len_a, skeleton_len_b)`, a 0–1 score for ranking.
 - `confusable_only` — `true` when the strings differ but are **identical after skeletonization** (a pure homoglyph attack with zero real edits) — your highest-confidence signal
 
-## Known limitation: multi-character homoglyphs
+Single-pair and batch (stdin) modes use keys `a` and `b`; list mode uses `input` and `match`. Batch and list modes emit JSONL.
 
-The skeleton map currently keys on **single code points**, so multi-character
-visual confusables are **not** caught:
+## Multi-character homoglyphs
+
+Multi-character visual confusables ARE detected via full UTS#39
+skeletonization — each string is reduced to its skeleton (every code point
+mapped through the confusables table and concatenated) before measuring
+distance:
 
 - `rn` → `m` (`rnicrosoft` vs `microsoft`)
 - `vv` → `w`
 - `cl` → `d`
 
-These score as full edits. UTS #39 does define multi-char mappings; supporting
-them requires a skeletonization pass that greedily rewrites multi-char
-sequences before the edit-distance step. The data is already parsed out (2103
-multi-target entries were noted during build); wiring a multi-char skeleton
-pass is the natural next extension. Leetspeak substitutions (`3`→`e`, `4`→`a`)
-are deliberately **not** treated as homoglyphs because UTS #39 does not consider
-them visually confusable.
+These surface in the `skeleton_damerau` field (~0 for a pure multi-char spoof)
+and set `confusable_only` to `true`, even when the strings differ in length.
+The `homoglyph_damerau` field uses per-character weighting and does NOT collapse
+multi-char sequences, so comparing the two fields distinguishes "a few homoglyph
+substitutions" from "fully visually confusable".
+
+Leetspeak substitutions (`3`→`e`, `4`→`a`) are deliberately NOT treated as
+homoglyphs because UTS #39 does not consider them visually confusable.
 
 ## Building
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # 6 unit tests covering each metric + confusable logic
+cargo test               # 21 unit tests covering metrics, skeletonization, confusable logic, arg parsing, and list mode
 ```
 
 The confusables table is embedded at compile time (`src/confusables_data.rs`,
