@@ -132,6 +132,25 @@ fn metric_value(s: &Scores, m: Metric) -> f64 {
     }
 }
 
+/// Sort results ascending by the active metric (most suspicious first) and
+/// optionally keep only the first `top`. Stable: ties preserve input order.
+#[allow(dead_code)] // TODO(task-7): remove once used by list mode
+fn sort_and_truncate(
+    mut results: Vec<(String, String, Scores)>,
+    metric: Metric,
+    top: Option<usize>,
+) -> Vec<(String, String, Scores)> {
+    results.sort_by(|x, y| {
+        metric_value(&x.2, metric)
+            .partial_cmp(&metric_value(&y.2, metric))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(n) = top {
+        results.truncate(n);
+    }
+    results
+}
+
 struct Scores {
     lev: u64,
     dam: u64,
@@ -428,5 +447,47 @@ mod tests {
         let s = score_pair("rnicrosoft", "microsoft", 0.1);
         assert_eq!(metric_value(&s, Metric::Homoglyph), s.hogl);
         assert_eq!(metric_value(&s, Metric::Skeleton), s.skel);
+    }
+
+    #[test]
+    fn sort_and_truncate_orders_and_caps() {
+        // Build results with known skeleton distances by pairing against "abc".
+        let pairs = vec![
+            ("abc".to_string(), "abXYZ".to_string(), score_pair("abc", "abXYZ", 0.1)),
+            ("abc".to_string(), "abc".to_string(), score_pair("abc", "abc", 0.1)),
+            ("abc".to_string(), "abd".to_string(), score_pair("abc", "abd", 0.1)),
+        ];
+        let sorted = sort_and_truncate(pairs, Metric::Skeleton, None);
+        // Ascending by skeleton distance: identical (0) first.
+        assert_eq!(sorted[0].1, "abc");
+        assert!(metric_value(&sorted[0].2, Metric::Skeleton)
+            <= metric_value(&sorted[1].2, Metric::Skeleton));
+        assert!(metric_value(&sorted[1].2, Metric::Skeleton)
+            <= metric_value(&sorted[2].2, Metric::Skeleton));
+
+        // --top caps the output length.
+        let pairs2 = vec![
+            ("abc".to_string(), "abd".to_string(), score_pair("abc", "abd", 0.1)),
+            ("abc".to_string(), "abc".to_string(), score_pair("abc", "abc", 0.1)),
+        ];
+        let top1 = sort_and_truncate(pairs2, Metric::Skeleton, Some(1));
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].1, "abc"); // closest kept
+    }
+
+    #[test]
+    fn sort_is_stable_on_ties() {
+        // Equal scores must preserve input order.
+        let pairs = vec![
+            ("x".to_string(), "first".to_string(), score_pair("x", "first", 0.1)),
+            ("x".to_string(), "secnd".to_string(), score_pair("x", "secnd", 0.1)),
+        ];
+        // Both 5-char non-confusable => same skeleton distance.
+        let a = metric_value(&pairs[0].2, Metric::Skeleton);
+        let b = metric_value(&pairs[1].2, Metric::Skeleton);
+        assert!((a - b).abs() < 1e-9, "precondition: scores must tie");
+        let sorted = sort_and_truncate(pairs, Metric::Skeleton, None);
+        assert_eq!(sorted[0].1, "first");
+        assert_eq!(sorted[1].1, "secnd");
     }
 }
