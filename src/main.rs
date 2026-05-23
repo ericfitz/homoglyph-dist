@@ -250,7 +250,6 @@ impl Field {
 
 /// Parse a comma-separated field list into canonical-ordered, de-duplicated
 /// Fields. Errors (naming the offender + valid names) on any unknown field.
-#[allow(dead_code)] // TODO(task-5): remove once used
 fn parse_fields(spec: &str) -> Result<Vec<Field>, String> {
     let mut seen = [false; Field::ALL.len()];
     for raw in spec.split(',') {
@@ -448,6 +447,10 @@ struct Opts {
     top: Option<usize>,
     metric: Metric,
     positionals: Vec<String>,
+    #[allow(dead_code)] // TODO(task-6): remove once read by main()
+    fields: Option<Vec<Field>>,
+    #[allow(dead_code)] // TODO(task-6): remove once read by main()
+    len_tolerance: f64,
 }
 
 fn print_usage() {
@@ -487,11 +490,21 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
         top: None,
         metric: Metric::Skeleton,
         positionals: Vec::new(),
+        fields: None,
+        len_tolerance: 0.25,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
                 print_usage();
+                std::process::exit(0);
+            }
+            "-v" | "--version" => {
+                println!(
+                    "sqdist {} ({})",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("SQDIST_GIT_SHA")
+                );
                 std::process::exit(0);
             }
             "-j" | "--json" => opts.json = true,
@@ -527,6 +540,18 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
             "-w" | "--hogl-weight" => {
                 let v = args.next().ok_or("--hogl-weight needs a value")?;
                 opts.hogl_weight = v.parse().map_err(|_| "invalid --hogl-weight")?;
+            }
+            "--fields" => {
+                let v = args.next().ok_or("--fields needs a value")?;
+                opts.fields = Some(parse_fields(&v)?);
+            }
+            "--len-tolerance" => {
+                let v = args.next().ok_or("--len-tolerance needs a value")?;
+                let t: f64 = v.parse().map_err(|_| "invalid --len-tolerance")?;
+                if !(0.0..=1.0).contains(&t) {
+                    return Err("--len-tolerance must be between 0.0 and 1.0".into());
+                }
+                opts.len_tolerance = t;
             }
             "-t" | "--threshold" => {
                 let v = args.next().ok_or("--threshold needs a value")?;
@@ -1128,5 +1153,78 @@ mod tests {
         let s = score_pair("a0", "aOxyz", 0.1);
         let (cat, _msg) = verdict(&s, 2, 5, 0.25);
         assert_eq!(cat, Verdict::LikelyBenign);
+    }
+
+    #[test]
+    fn parse_fields_flag() {
+        let o = parse_from(vec![
+            "--fields".into(),
+            "damerau,confusable_only".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            o.fields.as_deref(),
+            Some(&[Field::Damerau, Field::ConfusableOnly][..])
+        );
+    }
+
+    #[test]
+    fn parse_fields_flag_rejects_unknown() {
+        assert!(parse_from(vec![
+            "--fields".into(),
+            "damerau,nope".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn parse_len_tolerance_default_and_override() {
+        let d = parse_from(vec!["a".into(), "b".into()]).unwrap();
+        assert!((d.len_tolerance - 0.25).abs() < 1e-9);
+        let o = parse_from(vec![
+            "--len-tolerance".into(),
+            "0.4".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        assert!((o.len_tolerance - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_len_tolerance_rejects_out_of_range() {
+        assert!(parse_from(vec![
+            "--len-tolerance".into(),
+            "5.0".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .is_err());
+        assert!(parse_from(vec![
+            "--len-tolerance".into(),
+            "-0.5".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .is_err());
+        // boundary values 0.0 and 1.0 are allowed
+        assert!(parse_from(vec![
+            "--len-tolerance".into(),
+            "0.0".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .is_ok());
+        assert!(parse_from(vec![
+            "--len-tolerance".into(),
+            "1.0".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .is_ok());
     }
 }
