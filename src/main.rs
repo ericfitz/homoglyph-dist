@@ -846,4 +846,11 @@ mod tests {
             score_candidate("paypal", "p\u{0430}ypal", 0.1, Metric::Skeleton, Some(0.0)).is_some()
         );
     }
+
+    #[test]
+    fn git_sha_env_is_present() {
+        // build.rs always sets this (real SHA or "unknown").
+        let sha = env!("SQDIST_GIT_SHA");
+        assert!(!sha.is_empty());
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "sqdist"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Fast string-distance CLI for typosquatting and homoglyph detection (Levenshtein, Damerau-Levenshtein, UTS#39 confusable-weighted)."
 license = "MIT OR Apache-2.0"
@@ -12,6 +12,7 @@ categories = ["command-line-utilities", "text-processing"]
 # Publish only what the crate needs — exclude repo tooling, design docs, and the
 # release/signing scripts.
 include = [
+    "/build.rs",
     "/src/**/*.rs",
     "/Cargo.toml",
     "/README.md",
