@@ -322,7 +322,11 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
                 opts.metric = match v.as_str() {
                     "homoglyph" => Metric::Homoglyph,
                     "skeleton" => Metric::Skeleton,
-                    other => return Err(format!("invalid --metric: {other} (use homoglyph|skeleton)")),
+                    other => {
+                        return Err(format!(
+                            "invalid --metric: {other} (use homoglyph|skeleton)"
+                        ))
+                    }
                 };
             }
             "-w" | "--hogl-weight" => {
@@ -361,7 +365,10 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
         return Ok(opts);
     }
     if opts.positionals.len() != 2 {
-        return Err(format!("expected 2 string arguments, got {}", opts.positionals.len()));
+        return Err(format!(
+            "expected 2 string arguments, got {}",
+            opts.positionals.len()
+        ));
     }
     Ok(opts)
 }
@@ -393,8 +400,13 @@ fn main() -> ExitCode {
         };
         let lines = io::BufReader::new(file).lines().map_while(Result::ok);
         let results = process_list(
-            string, lines, opts.hogl_weight, opts.metric,
-            opts.threshold, opts.sort, opts.top,
+            string,
+            lines,
+            opts.hogl_weight,
+            opts.metric,
+            opts.threshold,
+            opts.sort,
+            opts.top,
         );
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -417,7 +429,7 @@ fn main() -> ExitCode {
             if line.is_empty() {
                 continue;
             }
-            let mut parts = line.splitn(2, |c| c == '\t' || c == ',');
+            let mut parts = line.splitn(2, ['\t', ',']);
             let (la, lb) = match (parts.next(), parts.next()) {
                 (Some(x), Some(y)) => (x, y),
                 _ => {
@@ -487,7 +499,10 @@ mod tests {
         let spoof = "g\u{043E}\u{043E}gle";
         let real = "google";
         let h = damerau(&cv(spoof), &cv(real), true, 0.1);
-        assert!((h - 0.2).abs() < 1e-9, "two homoglyphs should be 0.2, got {h}");
+        assert!(
+            (h - 0.2).abs() < 1e-9,
+            "two homoglyphs should be 0.2, got {h}"
+        );
     }
 
     #[test]
@@ -516,8 +531,18 @@ mod tests {
 
     #[test]
     fn skeleton_is_idempotent() {
-        for s in ["microsoft", "paypal", "vvallet", "g\u{43E}\u{43E}gle", "abc123"] {
-            assert_eq!(skeleton(&skeleton(s)), skeleton(s), "not idempotent for {s}");
+        for s in [
+            "microsoft",
+            "paypal",
+            "vvallet",
+            "g\u{43E}\u{43E}gle",
+            "abc123",
+        ] {
+            assert_eq!(
+                skeleton(&skeleton(s)),
+                skeleton(s),
+                "not idempotent for {s}"
+            );
         }
     }
 
@@ -535,9 +560,17 @@ mod tests {
     fn skeleton_damerau_catches_multichar_spoof() {
         let s = score_pair("rnicrosoft", "microsoft", 0.1);
         // Per-char metric can't align "rn" to "m", so it costs real edits.
-        assert!(s.hogl > 1.0, "homoglyph_damerau should be > 1, got {}", s.hogl);
+        assert!(
+            s.hogl > 1.0,
+            "homoglyph_damerau should be > 1, got {}",
+            s.hogl
+        );
         // Skeleton metric sees identical skeletons => zero.
-        assert!(s.skel.abs() < 1e-9, "skeleton_damerau should be ~0, got {}", s.skel);
+        assert!(
+            s.skel.abs() < 1e-9,
+            "skeleton_damerau should be ~0, got {}",
+            s.skel
+        );
         assert!(s.confusable_only, "should be confusable_only");
     }
 
@@ -570,22 +603,46 @@ mod tests {
     fn sort_and_truncate_orders_and_caps() {
         // Build results with known skeleton distances by pairing against "abc".
         let pairs = vec![
-            ("abc".to_string(), "abXYZ".to_string(), score_pair("abc", "abXYZ", 0.1)),
-            ("abc".to_string(), "abc".to_string(), score_pair("abc", "abc", 0.1)),
-            ("abc".to_string(), "abd".to_string(), score_pair("abc", "abd", 0.1)),
+            (
+                "abc".to_string(),
+                "abXYZ".to_string(),
+                score_pair("abc", "abXYZ", 0.1),
+            ),
+            (
+                "abc".to_string(),
+                "abc".to_string(),
+                score_pair("abc", "abc", 0.1),
+            ),
+            (
+                "abc".to_string(),
+                "abd".to_string(),
+                score_pair("abc", "abd", 0.1),
+            ),
         ];
         let sorted = sort_and_truncate(pairs, Metric::Skeleton, None);
         // Ascending by skeleton distance: identical (0) first.
         assert_eq!(sorted[0].1, "abc");
-        assert!(metric_value(&sorted[0].2, Metric::Skeleton)
-            <= metric_value(&sorted[1].2, Metric::Skeleton));
-        assert!(metric_value(&sorted[1].2, Metric::Skeleton)
-            <= metric_value(&sorted[2].2, Metric::Skeleton));
+        assert!(
+            metric_value(&sorted[0].2, Metric::Skeleton)
+                <= metric_value(&sorted[1].2, Metric::Skeleton)
+        );
+        assert!(
+            metric_value(&sorted[1].2, Metric::Skeleton)
+                <= metric_value(&sorted[2].2, Metric::Skeleton)
+        );
 
         // --top caps the output length.
         let pairs2 = vec![
-            ("abc".to_string(), "abd".to_string(), score_pair("abc", "abd", 0.1)),
-            ("abc".to_string(), "abc".to_string(), score_pair("abc", "abc", 0.1)),
+            (
+                "abc".to_string(),
+                "abd".to_string(),
+                score_pair("abc", "abd", 0.1),
+            ),
+            (
+                "abc".to_string(),
+                "abc".to_string(),
+                score_pair("abc", "abc", 0.1),
+            ),
         ];
         let top1 = sort_and_truncate(pairs2, Metric::Skeleton, Some(1));
         assert_eq!(top1.len(), 1);
@@ -612,8 +669,16 @@ mod tests {
     fn sort_is_stable_on_ties() {
         // Equal scores must preserve input order.
         let pairs = vec![
-            ("x".to_string(), "first".to_string(), score_pair("x", "first", 0.1)),
-            ("x".to_string(), "secnd".to_string(), score_pair("x", "secnd", 0.1)),
+            (
+                "x".to_string(),
+                "first".to_string(),
+                score_pair("x", "first", 0.1),
+            ),
+            (
+                "x".to_string(),
+                "secnd".to_string(),
+                score_pair("x", "secnd", 0.1),
+            ),
         ];
         // Both 5-char non-confusable => same skeleton distance.
         let a = metric_value(&pairs[0].2, Metric::Skeleton);
@@ -627,10 +692,14 @@ mod tests {
     #[test]
     fn parse_list_mode() {
         let o = parse_from(vec![
-            "--string".into(), "paypal".into(),
-            "--list".into(), "names.txt".into(),
-            "--metric".into(), "skeleton".into(),
-        ]).unwrap();
+            "--string".into(),
+            "paypal".into(),
+            "--list".into(),
+            "names.txt".into(),
+            "--metric".into(),
+            "skeleton".into(),
+        ])
+        .unwrap();
         assert_eq!(o.string.as_deref(), Some("paypal"));
         assert_eq!(o.list.as_deref(), Some("names.txt"));
         assert_eq!(o.metric, Metric::Skeleton);
@@ -640,9 +709,14 @@ mod tests {
     #[test]
     fn parse_top_implies_sort() {
         let o = parse_from(vec![
-            "--string".into(), "x".into(), "--list".into(), "f".into(),
-            "--top".into(), "5".into(),
-        ]).unwrap();
+            "--string".into(),
+            "x".into(),
+            "--list".into(),
+            "f".into(),
+            "--top".into(),
+            "5".into(),
+        ])
+        .unwrap();
         assert_eq!(o.top, Some(5));
         assert!(o.sort);
     }
@@ -650,22 +724,23 @@ mod tests {
     #[test]
     fn parse_rejects_mode_conflicts() {
         // positionals + --list
-        assert!(parse_from(vec![
-            "a".into(), "b".into(), "--list".into(), "f".into(),
-        ]).is_err());
+        assert!(parse_from(vec!["a".into(), "b".into(), "--list".into(), "f".into(),]).is_err());
         // --stdin + --list
-        assert!(parse_from(vec![
-            "--stdin".into(), "--list".into(), "f".into(),
-        ]).is_err());
+        assert!(parse_from(vec!["--stdin".into(), "--list".into(), "f".into(),]).is_err());
         // --list without --string
         assert!(parse_from(vec!["--list".into(), "f".into()]).is_err());
         // --string without --list
         assert!(parse_from(vec!["--string".into(), "x".into()]).is_err());
         // bad metric
         assert!(parse_from(vec![
-            "--string".into(), "x".into(), "--list".into(), "f".into(),
-            "--metric".into(), "bogus".into(),
-        ]).is_err());
+            "--string".into(),
+            "x".into(),
+            "--list".into(),
+            "f".into(),
+            "--metric".into(),
+            "bogus".into(),
+        ])
+        .is_err());
     }
 
     #[test]
@@ -680,26 +755,46 @@ mod tests {
     #[test]
     fn process_list_filters_sorts_caps() {
         let lines = vec![
-            "paypal".to_string(),     // identical -> skel 0
+            "paypal".to_string(),        // identical -> skel 0
             "p\u{0430}ypal".to_string(), // homoglyph -> skel 0, confusable_only
             "completely-different".to_string(),
         ];
         // No threshold, sort by skeleton, top 2: the two zero-distance lines.
-        let out = process_list("paypal", lines.clone().into_iter(), 0.1,
-                               Metric::Skeleton, None, true, Some(2));
+        let out = process_list(
+            "paypal",
+            lines.clone().into_iter(),
+            0.1,
+            Metric::Skeleton,
+            None,
+            true,
+            Some(2),
+        );
         assert_eq!(out.len(), 2);
         assert!(metric_value(&out[0].2, Metric::Skeleton).abs() < 1e-9);
         assert!(metric_value(&out[1].2, Metric::Skeleton).abs() < 1e-9);
 
         // Threshold filters: only skeleton distance <= 0.0 kept (the 2 matches).
-        let out2: Vec<_> = process_list("paypal", lines.into_iter(), 0.1,
-                                        Metric::Skeleton, Some(0.0), false, None);
+        let out2: Vec<_> = process_list(
+            "paypal",
+            lines.into_iter(),
+            0.1,
+            Metric::Skeleton,
+            Some(0.0),
+            false,
+            None,
+        );
         assert_eq!(out2.len(), 2);
 
         // Blank lines are skipped.
-        let out3 = process_list("paypal",
+        let out3 = process_list(
+            "paypal",
             vec!["".to_string(), "  ".to_string(), "paypal".to_string()].into_iter(),
-            0.1, Metric::Skeleton, None, false, None);
+            0.1,
+            Metric::Skeleton,
+            None,
+            false,
+            None,
+        );
         assert_eq!(out3.len(), 1);
     }
 }
