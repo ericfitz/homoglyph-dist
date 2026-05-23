@@ -148,8 +148,34 @@ fn sort_and_truncate(
     results
 }
 
-/// Score `string` against each non-blank line, applying threshold filtering
-/// (against `metric`) while collecting, then optionally sort/truncate.
+/// Score `string` against one raw candidate line. Returns the scored row
+/// (with the trimmed candidate as `match`), or `None` if the line is blank or
+/// its `metric` distance exceeds `threshold`. Shared by the streaming and
+/// buffered (sort/top) list-mode paths so both apply identical trim/skip/filter
+/// rules.
+fn score_candidate(
+    string: &str,
+    raw: &str,
+    hogl_weight: f64,
+    metric: Metric,
+    threshold: Option<f64>,
+) -> Option<(String, String, Scores)> {
+    let line = raw.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let s = score_pair(string, line, hogl_weight);
+    if let Some(t) = threshold {
+        if metric_value(&s, metric) > t {
+            return None;
+        }
+    }
+    Some((string.to_string(), line.to_string(), s))
+}
+
+/// Score `string` against each line, collecting the kept rows and sorting /
+/// truncating them. Used only when ranking is requested (`--sort`/`--top`);
+/// the unsorted path streams via `score_candidate` without buffering.
 fn process_list<I: Iterator<Item = String>>(
     string: &str,
     lines: I,
@@ -159,20 +185,9 @@ fn process_list<I: Iterator<Item = String>>(
     sort: bool,
     top: Option<usize>,
 ) -> Vec<(String, String, Scores)> {
-    let mut results: Vec<(String, String, Scores)> = Vec::new();
-    for raw in lines {
-        let line = raw.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let s = score_pair(string, line, hogl_weight);
-        if let Some(t) = threshold {
-            if metric_value(&s, metric) > t {
-                continue;
-            }
-        }
-        results.push((string.to_string(), line.to_string(), s));
-    }
+    let mut results: Vec<(String, String, Scores)> = lines
+        .filter_map(|raw| score_candidate(string, &raw, hogl_weight, metric, threshold))
+        .collect();
     if sort || top.is_some() {
         results = sort_and_truncate(results, metric, top);
     }
@@ -399,19 +414,31 @@ fn main() -> ExitCode {
             }
         };
         let lines = io::BufReader::new(file).lines().map_while(Result::ok);
-        let results = process_list(
-            string,
-            lines,
-            opts.hogl_weight,
-            opts.metric,
-            opts.threshold,
-            opts.sort,
-            opts.top,
-        );
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
-        for (a, b, s) in &results {
-            let _ = writeln!(out, "{}", result_json(a, b, s, ("input", "match")));
+        if opts.sort || opts.top.is_some() {
+            // Ranking requires all rows up front: buffer, sort/truncate, emit.
+            let results = process_list(
+                string,
+                lines,
+                opts.hogl_weight,
+                opts.metric,
+                opts.threshold,
+                opts.sort,
+                opts.top,
+            );
+            for (a, b, s) in &results {
+                let _ = writeln!(out, "{}", result_json(a, b, s, ("input", "match")));
+            }
+        } else {
+            // No ranking: stream each kept row straight out, no buffering.
+            for raw in lines {
+                if let Some((a, b, s)) =
+                    score_candidate(string, &raw, opts.hogl_weight, opts.metric, opts.threshold)
+                {
+                    let _ = writeln!(out, "{}", result_json(&a, &b, &s, ("input", "match")));
+                }
+            }
         }
         return ExitCode::SUCCESS;
     }
@@ -796,5 +823,27 @@ mod tests {
             None,
         );
         assert_eq!(out3.len(), 1);
+    }
+
+    #[test]
+    fn score_candidate_trims_skips_and_thresholds() {
+        // Blank / whitespace-only -> None.
+        assert!(score_candidate("paypal", "", 0.1, Metric::Skeleton, None).is_none());
+        assert!(score_candidate("paypal", "   ", 0.1, Metric::Skeleton, None).is_none());
+
+        // A match is returned with the trimmed candidate; input is the string arg.
+        let r = score_candidate("paypal", "  p\u{0430}ypal  ", 0.1, Metric::Skeleton, None)
+            .expect("should score");
+        assert_eq!(r.0, "paypal");
+        assert_eq!(r.1, "p\u{0430}ypal"); // trimmed
+        assert!(r.2.confusable_only);
+
+        // Threshold against the chosen metric drops over-threshold rows.
+        // skeleton distance of an unrelated name > 0.0 => dropped.
+        assert!(score_candidate("paypal", "zzzzzz", 0.1, Metric::Skeleton, Some(0.0)).is_none());
+        // skeleton distance 0 (homoglyph) <= 0.0 => kept.
+        assert!(
+            score_candidate("paypal", "p\u{0430}ypal", 0.1, Metric::Skeleton, Some(0.0)).is_some()
+        );
     }
 }

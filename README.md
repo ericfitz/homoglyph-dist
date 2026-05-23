@@ -117,27 +117,30 @@ sqdist --string paypal --list candidates.txt -t 0.5
 
 #### Memory usage on large lists
 
-List mode buffers its **emitted** results in memory (so `--sort`/`--top` can
-rank them) rather than streaming each line straight out. Each retained row costs
-roughly **~100 bytes of fixed overhead + ~2× the candidate's length in bytes** —
-about **190 bytes per row for 16-character names**. Peak resident memory scales
-with the number of rows you *keep*, not the file size:
+By default list mode **streams**: each matching row is written to stdout as it
+is scored, so memory stays flat (~2 MB) no matter how large the file is — a
+million-line scan costs the same as a hundred.
 
-| Rows kept (≈16-char names) | Peak RSS |
+`--sort` and `--top` are the exception. Ranking needs every row in hand before
+it can order them, so those flags **buffer all kept rows** in memory first. Each
+buffered row costs roughly **~100 bytes of fixed overhead + ~2× the candidate's
+length in bytes** — about **190 bytes per row for 16-character names**. Peak
+resident memory then scales with the number of rows kept:
+
+| Rows kept (≈16-char names), `--sort` | Peak RSS |
 |---|---|
 | 10,000 | ~5 MB |
 | 100,000 | ~23 MB |
 | 1,000,000 | ~190 MB |
 
-Rough rule of thumb: `peak_MB ≈ 4 (baseline) + rows × (100 + 2 × avg_name_len) / 1e6`.
+Rough rule of thumb when sorting: `peak_MB ≈ 2 (baseline) + rows × (100 + 2 × avg_name_len) / 1e6`.
 
-This only matters past a few hundred thousand candidates, and **`-t` keeps it
-flat**: a threshold drops non-matching rows *before* they're buffered, so a
-million-line scan that alerts on only a handful stays at the ~4 MB baseline.
-Reach for `-t` (optionally with `--top`) when screening very large lists; use
-unfiltered `--sort` only when you actually want every row ranked. (Splitting a
-huge list into chunks and scanning each is also fine — results are independent
-per line.)
+`-t` cuts this down further even when sorting: a threshold drops non-matching
+rows *before* they're buffered, so `--sort -t 0.5` over a million lines that
+alerts on only a handful stays near the ~2 MB baseline. So: stream by default;
+add `-t` (and optionally `--top`) when you want a ranked view of a very large
+list without holding it all in memory. (Chunking a huge list and scanning each
+piece is also fine — results are independent per line.)
 
 ## Output fields
 
