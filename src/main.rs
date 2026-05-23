@@ -463,18 +463,30 @@ fn print_usage() {
          \x20   sqdist [OPTIONS] --string <S> --list <FILE> # score <S> vs each line\n\n\
          OPTIONS:\n\
          \x20   -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
-         \x20   -t, --threshold <F>     Alert (emit / exit 0) when the --metric distance <= F\n\
+         \x20   -t, --threshold <F>     Alert when the --metric distance <= F. Single-pair:\n\
+         \x20                           sets exit code. Batch: filters output; exit 1 if none match.\n\
          \x20   -m, --metric <M>        Distance for -t and --sort: homoglyph|skeleton (default skeleton)\n\
+         \x20       --fields <LIST>     Comma-separated fields to show (default: all). See FIELD MEANINGS.\n\
+         \x20       --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)\n\
          \x20   -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL\n\
          \x20       --string <S>        (with --list) the single string to compare\n\
          \x20       --list <FILE>       (with --string) score <S> against each non-blank line\n\
          \x20       --sort              List mode: emit most-suspicious-first (buffers)\n\
          \x20       --top <N>           List mode: keep only the N closest (implies --sort)\n\
          \x20   -j, --json              Emit JSON (single-pair mode)\n\
+         \x20   -v, --version           Print version and commit, then exit\n\
          \x20   -h, --help              This help\n\n\
-         OUTPUT FIELDS: levenshtein, damerau, homoglyph_damerau, skeleton_damerau,\n\
-         \x20             normalized, skeleton_normalized, confusable_only\n\
-         \x20  single-pair/stdin keys: a,b   |   list-mode keys: input,match\n"
+         FIELD MEANINGS:\n\
+         \x20   levenshtein           min single-char insert/delete/substitute edits\n\
+         \x20   damerau               like levenshtein, but an adjacent swap counts as one edit\n\
+         \x20   homoglyph_damerau     Damerau where a single-char confusable substitution costs\n\
+         \x20                         --hogl-weight (multi-char confusables are caught by skeleton_damerau)\n\
+         \x20   skeleton_damerau      Damerau after reducing both strings to UTS#39 skeletons\n\
+         \x20                         (~0 when visually identical, incl. multi-char confusables)\n\
+         \x20   normalized            homoglyph_damerau / max(len_a, len_b), a 0-1 score\n\
+         \x20   skeleton_normalized   skeleton_damerau / max(skeleton lengths), a 0-1 score\n\
+         \x20   confusable_only       true when the strings differ but share an identical skeleton\n\n\
+         OUTPUT KEYS: single-pair/stdin use a,b; list mode uses input,match. Batch is JSONL.\n"
     );
 }
 
