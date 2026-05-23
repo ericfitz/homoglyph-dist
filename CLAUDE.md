@@ -19,10 +19,11 @@ There is no separate lint config; use `cargo clippy` and `cargo fmt --check`.
 
 ## Architecture
 
-Two source files plus one build-time helper:
+Two source files plus build-time helpers:
 
 - [src/main.rs](src/main.rs) — everything: distance algorithms, the confusable model, arg parsing, single-pair and `--stdin` batch modes, and the test module. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
 - [src/confusables_data.rs](src/confusables_data.rs) — **auto-generated, do not hand-edit.** A `static CONFUSABLES: &[(u32, &str)]` slice (~6565 entries) sorted by code point, embedded at compile time so the binary needs no runtime data files or network.
+- [build.rs](build.rs) — compile-time git SHA capture (runs `git rev-parse --short HEAD`, exposes `SQDIST_GIT_SHA` env var, falls back to "unknown" for crates.io/git-less builds).
 - [scripts/gen_confusables.py](scripts/gen_confusables.py) — regenerates `confusables_data.rs` from Unicode UTS #39 `confusables.txt`. Pure stdlib (no dependencies); resolves its paths relative to the repo root, so run it from anywhere.
 
 ### Modes and structure
@@ -36,9 +37,7 @@ Three modes, dispatched by a thin `main()`:
 | watchlist | `--string` + `--list` | `--string` × each file line | `input`/`match` |
 
 The logic lives in pure, unit-tested functions — `skeleton`, `score_pair`,
-`metric_value`, `sort_and_truncate`, `process_list`, `result_json`, and the
-testable `parse_from(Vec<String>)` arg parser — with `main()` only doing I/O
-dispatch.
+`metric_value`, `sort_and_truncate`, `process_list`, `result_json`, `parse_from(Vec<String>)` arg parser, `verdict`, `parse_fields`, `selected_fields`, and `batch_matched_ok` — plus the `Field` and `Verdict` enums and `Field::value_string` method — with `main()` only doing I/O dispatch.
 
 ### The confusable model (the conceptual core)
 
@@ -77,6 +76,14 @@ Both human and JSON output expose the same fields, relied on by downstream pipel
 - `normalized` — `homoglyph_damerau / max(len_a, len_b)`
 - `skeleton_normalized` — `skeleton_damerau / max(len(skeleton(a)), len(skeleton(b)))`
 - `confusable_only` — true when strings differ but are identical after skeletonization (highest-confidence spoof signal)
+
+**Field filtering:** `--fields <comma-list>` filters which score fields are displayed/emitted in all modes. Identifier keys (`a`/`b` or `input`/`match`) are always preserved; fields emit in canonical order. Note that `-t`/`--metric`/`--sort` operate on the full internal scores regardless of `--fields` setting.
+
+**Single-pair human verdict:** Single-pair human output appends an interpretation verdict line: `[IDENTICAL]`, `[LIKELY SPOOF]`, or `[LIKELY BENIGN]` with explanation. This is produced by the pure `verdict(scores, len_a, len_b, len_tolerance)` function and appears only in human mode (NOT in JSON or batch modes). Spoof rule: `confusable_only || (homoglyph_share > 0.5 && max(len) >= 3 && len_diff_ratio <= len_tolerance)`, where `homoglyph_share = (damerau - skeleton_damerau) / damerau`. Tune with `--len-tolerance` (default 0.25, range [0,1]).
+
+**Batch exit codes:** Batch modes (`--stdin`, `--list`) with `-t` exit 1 when zero rows match; 0 otherwise. Without `-t`, always exit 0.
+
+**Version string:** `-v/--version` prints `sqdist <version> (<git-sha>)`, where the git SHA is captured at build time by `build.rs` (falls back to "unknown" for crates.io/git-less builds).
 
 **Modes and JSON keys:**
 - Single pair (two positionals) and `--stdin` batch: JSON keys `a`, `b`
