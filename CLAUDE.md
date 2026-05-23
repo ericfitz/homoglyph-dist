@@ -23,7 +23,7 @@ Two source files plus one build-time helper:
 
 - [src/main.rs](src/main.rs) — everything: distance algorithms, the confusable model, arg parsing, single-pair and `--stdin` batch modes, and the test module. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
 - [src/confusables_data.rs](src/confusables_data.rs) — **auto-generated, do not hand-edit.** A `static CONFUSABLES: &[(u32, &str)]` slice (~6565 entries) sorted by code point, embedded at compile time so the binary needs no runtime data files or network.
-- [gen_confusables.py](gen_confusables.py) — regenerates `confusables_data.rs` from Unicode UTS #39 `confusables.txt`.
+- [scripts/gen_confusables.py](scripts/gen_confusables.py) — regenerates `confusables_data.rs` from Unicode UTS #39 `confusables.txt`. Pure stdlib (no dependencies); resolves its paths relative to the repo root, so run it from anywhere.
 
 ### The confusable model (the conceptual core)
 
@@ -39,7 +39,7 @@ When a new Unicode version ships:
 
 ```sh
 curl -sSL https://www.unicode.org/Public/security/latest/confusables.txt -o confusables.txt
-python3 gen_confusables.py   # rewrites src/confusables_data.rs
+python3 scripts/gen_confusables.py   # rewrites src/confusables_data.rs
 cargo test                   # confirm the embedded table still satisfies the confusable tests
 ```
 

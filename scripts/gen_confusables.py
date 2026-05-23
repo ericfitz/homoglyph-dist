@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Generate src/confusables_data.rs from Unicode UTS#39 confusables.txt.
 
-Usage:
+Usage (from the repo root):
     curl -sSL https://www.unicode.org/Public/security/latest/confusables.txt -o confusables.txt
-    python3 gen_confusables.py
+    python3 scripts/gen_confusables.py
 """
 import os
 import sys
 
-SRC = sys.argv[1] if len(sys.argv) > 1 else "confusables.txt"
-OUT = os.path.join("src", "confusables_data.rs")
+# Resolve paths relative to the repo root (scripts/'s parent) so the script
+# works regardless of the current working directory.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO_ROOT, "confusables.txt")
+OUT = os.path.join(REPO_ROOT, "src", "confusables_data.rs")
 
 mappings = {}
 with open(SRC, encoding="utf-8") as f:
