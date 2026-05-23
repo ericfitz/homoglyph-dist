@@ -3,6 +3,32 @@
 A blazing-fast Rust CLI for measuring string distance with a focus on
 **typosquatting** and **homoglyph** attack detection.
 
+## What it's for
+
+`sqdist` detects when one string is trying to *impersonate* another — the two
+main families of name-based impersonation attack:
+
+- **Typosquatting** — names one keyboard slip away from a real one (`gogle`,
+  `gooogle`, `googel` for `google`), used for malicious lookalike domains and
+  package names.
+- **Homoglyph spoofing** — characters that *look identical* but are different
+  Unicode code points: `pаypal` where the `а` is Cyrillic. Indistinguishable to
+  a human, a completely different string to a byte comparison.
+
+The hard part is that a homoglyph spoof and an innocent typo can have the
+**exact same** edit distance, so plain Levenshtein can't separate them. The
+homoglyph-weighted metric (below) makes genuine spoofs sink toward zero distance
+while real typos stay near 1.0, so you can alert on spoofs without false-alarming
+on honest fat-finger typos.
+
+Typical uses:
+
+- **Brand / domain monitoring** — scan newly-registered domains against a brand
+  watchlist (`microsоft.com`?).
+- **Supply-chain defense** — check new npm / PyPI / crates package names against
+  popular names to catch malicious lookalikes before they're installed.
+- **Phishing / fraud filtering** — flag deceptive sender names or URLs.
+
 It computes three distances between two strings:
 
 | Metric | Catches |
@@ -109,5 +135,5 @@ If a new Unicode version ships, regenerate the embedded table:
 
 ```sh
 curl -sSL https://www.unicode.org/Public/security/latest/confusables.txt -o confusables.txt
-python3 gen_confusables.py   # emits src/confusables_data.rs
+python3 scripts/gen_confusables.py   # emits src/confusables_data.rs
 ```
