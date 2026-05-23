@@ -52,10 +52,10 @@ collapses multi-char confusables (`rn`→`m`) that the per-character homoglyph
 column misses:
 
 ```
-                       lev  damerau  homoglyph  skeleton  confusable_only
-paypal vs pаypal        1      1        0.1        0          true   <- homoglyph spoof
-rnicrosoft vs microsoft 2      2        2          0          true   <- multi-char spoof
-google vs gogle         1      1        1          1          false  <- benign typo
+                          lev  damerau  homoglyph  skeleton  confusable_only
+paypal vs pаypal           1      1        0.1        0        true   <- homoglyph spoof
+rnicrosoft vs microsoft    2      2        2          0        true   <- multi-char spoof
+google vs gogle            1      1        1          1        false  <- benign typo
 ```
 
 Set a threshold (e.g. `-t 0.5`) to alert only on the spoofs.

@@ -25,13 +25,36 @@ Two source files plus one build-time helper:
 - [src/confusables_data.rs](src/confusables_data.rs) — **auto-generated, do not hand-edit.** A `static CONFUSABLES: &[(u32, &str)]` slice (~6565 entries) sorted by code point, embedded at compile time so the binary needs no runtime data files or network.
 - [scripts/gen_confusables.py](scripts/gen_confusables.py) — regenerates `confusables_data.rs` from Unicode UTS #39 `confusables.txt`. Pure stdlib (no dependencies); resolves its paths relative to the repo root, so run it from anywhere.
 
+### Modes and structure
+
+Three modes, dispatched by a thin `main()`:
+
+| Mode | Trigger | Pairing | JSON keys |
+|---|---|---|---|
+| single pair | two positionals | the two args | `a`/`b` |
+| stdin batch | `--stdin` | pre-paired tab/comma lines | `a`/`b` |
+| watchlist | `--string` + `--list` | `--string` × each file line | `input`/`match` |
+
+The logic lives in pure, unit-tested functions — `skeleton`, `score_pair`,
+`metric_value`, `sort_and_truncate`, `process_list`, `result_json`, and the
+testable `parse_from(Vec<String>)` arg parser — with `main()` only doing I/O
+dispatch.
+
 ### The confusable model (the conceptual core)
 
 Two characters are confusable when they share the same **skeleton** under UTS #39. `skeleton_of` does a binary search over the sorted `CONFUSABLES` slice; `confusable(a, b)` compares skeletons (falling back to the char itself when unmapped), which transitively handles confusable chains (Greek omicron, Cyrillic о, and Latin o all skeleton to the same thing, so all three are mutually confusable). `sub_cost` is the single hook where the homoglyph weight enters the otherwise-standard edit-distance DP. Skeleton comparison is **case-sensitive** per UTS #39 (`0`~`O` but not `0`~`o`) — tests encode this, don't "fix" it.
 
-### Known limitation — do not treat as a bug
+### Multi-character skeletonization (implemented)
 
-The skeleton map keys on **single code points only**, so multi-character homoglyphs (`rn`→`m`, `vv`→`w`, `cl`→`d`) are NOT caught and score as full edits. Supporting them requires a greedy multi-char skeletonization pass before the edit-distance step; the natural next extension, intentionally absent. Leetspeak (`3`→`e`) is deliberately excluded because UTS #39 does not consider it visually confusable.
+`skeleton(s: &str)` builds the full UTS#39 skeleton of a string (each code point
+mapped through the confusables table and concatenated), so multi-character
+confusables ARE caught: `rn`↔`m`, `vv`↔`w`, `cl`↔`d`. These surface in
+`skeleton_damerau` (≈0 for a pure multi-char spoof) and set `confusable_only`
+to `true` (defined as `a != b && skeleton(a) == skeleton(b)`, no equal-length
+requirement). The per-char `homoglyph_damerau` metric does NOT collapse
+multi-char sequences — keeping both lets a caller distinguish a few homoglyph
+substitutions from a fully-confusable string. Leetspeak (`3`→`e`) is still
+intentionally excluded (UTS #39 does not treat it as visually confusable).
 
 ## Regenerating the confusables table
 
@@ -43,8 +66,20 @@ python3 scripts/gen_confusables.py   # rewrites src/confusables_data.rs
 cargo test                   # confirm the embedded table still satisfies the confusable tests
 ```
 
-`gen_confusables.py` keeps only entries whose **source is a single code point** (it skips multi-codepoint sources). If multi-char support is ever added, this filter is where the parsing changes.
+`gen_confusables.py` filters the confusables table for embedding. Currently it keeps only entries whose **source is a single code point** (skipping multi-codepoint sources) because `skeleton()` maps each individual code point; multi-codepoint confusables are handled by the full-string skeletonization pass in `skeleton()` itself, which concatenates all mapped code points.
 
 ## Output contract
 
-Both human and JSON output expose the same fields, relied on by downstream pipelines — keep the JSON key names stable: `levenshtein`, `damerau`, `homoglyph_damerau`, `normalized` (= `homoglyph_damerau / max(len_a, len_b)`), `confusable_only` (true when strings differ but are identical after skeletonization — the highest-confidence spoof signal). `--stdin` batch mode always emits one JSON object per line; with `-t` it emits only lines at/under the threshold.
+Both human and JSON output expose the same fields, relied on by downstream pipelines — keep the JSON key names stable:
+
+- `levenshtein`, `damerau`, `homoglyph_damerau` — three distance metrics
+- `skeleton_damerau` — distance after full-string skeletonization (multi-char confusables caught)
+- `normalized` — `homoglyph_damerau / max(len_a, len_b)`
+- `skeleton_normalized` — `skeleton_damerau / max(len(skeleton(a)), len(skeleton(b)))`
+- `confusable_only` — true when strings differ but are identical after skeletonization (highest-confidence spoof signal)
+
+**Modes and JSON keys:**
+- Single pair (two positionals) and `--stdin` batch: JSON keys `a`, `b`
+- Watchlist (`--string` + `--list`): JSON keys `input`, `match`
+
+**Batch and list output:** always JSONL (one JSON object per line). With `-t` threshold: emits only lines at/under the threshold. `-m/--metric` (default `skeleton`) selects which distance drives `-t` and `--sort`.
