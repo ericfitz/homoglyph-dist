@@ -194,6 +194,80 @@ fn process_list<I: Iterator<Item = String>>(
     results
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // TODO(task-5): remove once used
+enum Field {
+    Levenshtein,
+    Damerau,
+    HomoglyphDamerau,
+    SkeletonDamerau,
+    Normalized,
+    SkeletonNormalized,
+    ConfusableOnly,
+}
+
+impl Field {
+    /// Canonical emission order (matches the Scores struct / output contract).
+    const ALL: [Field; 7] = [
+        Field::Levenshtein,
+        Field::Damerau,
+        Field::HomoglyphDamerau,
+        Field::SkeletonDamerau,
+        Field::Normalized,
+        Field::SkeletonNormalized,
+        Field::ConfusableOnly,
+    ];
+
+    /// The JSON key / human-row label for this field.
+    fn name(self) -> &'static str {
+        match self {
+            Field::Levenshtein => "levenshtein",
+            Field::Damerau => "damerau",
+            Field::HomoglyphDamerau => "homoglyph_damerau",
+            Field::SkeletonDamerau => "skeleton_damerau",
+            Field::Normalized => "normalized",
+            Field::SkeletonNormalized => "skeleton_normalized",
+            Field::ConfusableOnly => "confusable_only",
+        }
+    }
+
+    fn from_name(s: &str) -> Option<Field> {
+        Field::ALL.into_iter().find(|f| f.name() == s)
+    }
+}
+
+/// Parse a comma-separated field list into canonical-ordered, de-duplicated
+/// Fields. Errors (naming the offender + valid names) on any unknown field.
+#[allow(dead_code)] // TODO(task-5): remove once used
+fn parse_fields(spec: &str) -> Result<Vec<Field>, String> {
+    let mut seen = [false; Field::ALL.len()];
+    for raw in spec.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match Field::from_name(name) {
+            Some(f) => {
+                let idx = Field::ALL.iter().position(|&x| x == f).unwrap();
+                seen[idx] = true;
+            }
+            None => {
+                let valid: Vec<&str> = Field::ALL.iter().map(|f| f.name()).collect();
+                return Err(format!(
+                    "unknown field: {name} (valid: {})",
+                    valid.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(Field::ALL
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| seen[*i])
+        .map(|(_, f)| f)
+        .collect())
+}
+
 struct Scores {
     lev: u64,
     dam: u64,
@@ -852,5 +926,31 @@ mod tests {
         // build.rs always sets this (real SHA or "unknown").
         let sha = env!("SQDIST_GIT_SHA");
         assert!(!sha.is_empty());
+    }
+
+    #[test]
+    fn parse_fields_valid_and_canonical_order() {
+        // User order is ignored; canonical order is enforced.
+        let f = parse_fields("confusable_only,damerau").unwrap();
+        assert_eq!(f, vec![Field::Damerau, Field::ConfusableOnly]);
+        // All names parse.
+        let all = parse_fields(
+            "levenshtein,damerau,homoglyph_damerau,skeleton_damerau,normalized,skeleton_normalized,confusable_only",
+        )
+        .unwrap();
+        assert_eq!(all.len(), 7);
+    }
+
+    #[test]
+    fn parse_fields_rejects_unknown() {
+        let e = parse_fields("damerau,bogus").unwrap_err();
+        assert!(e.contains("bogus"), "error should name the bad field: {e}");
+    }
+
+    #[test]
+    fn parse_fields_dedups() {
+        // Repeated names collapse to one, still canonical order.
+        let f = parse_fields("damerau,damerau,levenshtein").unwrap();
+        assert_eq!(f, vec![Field::Levenshtein, Field::Damerau]);
     }
 }
