@@ -33,8 +33,6 @@ fn confusable(a: char, b: char) -> bool {
 /// UTS#39 skeleton of a string: map each code point through the confusables
 /// table (or pass it through unchanged), concatenating the results. Single,
 /// non-recursive pass — the table targets are already in canonical form.
-// TODO(task-2): remove #[allow(dead_code)] once skeleton() is called from score_pair.
-#[allow(dead_code)]
 fn skeleton(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut buf = [0u8; 4];
@@ -121,8 +119,14 @@ fn damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
 struct Scores {
     lev: u64,
     dam: u64,
-    hogl: f64,
-    norm: f64,
+    hogl: f64,      // per-char weighted Damerau (single-char confusables)
+    // TODO(task-5): remove once emitted
+    #[allow(dead_code)]
+    skel: f64,      // Damerau on full skeletons (multi-char aware)
+    norm: f64,      // hogl / max(len)
+    // TODO(task-5): remove once emitted
+    #[allow(dead_code)]
+    skel_norm: f64, // skel / max(skeleton len)
     confusable_only: bool,
 }
 
@@ -132,15 +136,24 @@ fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     let lev = levenshtein(&ca, &cb, false, 0.0);
     let dam = damerau(&ca, &cb, false, 0.0);
     let hogl = damerau(&ca, &cb, true, hogl_weight);
+
+    let ska = skeleton(a);
+    let skb = skeleton(b);
+    let sva: Vec<char> = ska.chars().collect();
+    let svb: Vec<char> = skb.chars().collect();
+    let skel = damerau(&sva, &svb, false, 0.0);
+
     let maxlen = ca.len().max(cb.len()).max(1) as f64;
-    let confusable_only = a != b
-        && ca.len() == cb.len()
-        && ca.iter().zip(cb.iter()).all(|(&x, &y)| confusable(x, y));
+    let skel_maxlen = sva.len().max(svb.len()).max(1) as f64;
+    let confusable_only = a != b && ska == skb;
+
     Scores {
         lev: lev as u64,
         dam: dam as u64,
         hogl,
+        skel,
         norm: hogl / maxlen,
+        skel_norm: skel / skel_maxlen,
         confusable_only,
     }
 }
@@ -364,5 +377,33 @@ mod tests {
         assert_eq!(skeleton("xyz"), "xyz");
         // Empty string.
         assert_eq!(skeleton(""), "");
+    }
+
+    #[test]
+    fn skeleton_damerau_catches_multichar_spoof() {
+        let s = score_pair("rnicrosoft", "microsoft", 0.1);
+        // Per-char metric can't align "rn" to "m", so it costs real edits.
+        assert!(s.hogl > 1.0, "homoglyph_damerau should be > 1, got {}", s.hogl);
+        // Skeleton metric sees identical skeletons => zero.
+        assert!(s.skel.abs() < 1e-9, "skeleton_damerau should be ~0, got {}", s.skel);
+        assert!(s.confusable_only, "should be confusable_only");
+    }
+
+    #[test]
+    fn confusable_only_spans_unequal_lengths() {
+        // "rnicrosoft" (10) vs "microsoft" (9): different lengths, same skeleton.
+        let s = score_pair("rnicrosoft", "microsoft", 0.1);
+        assert!(s.confusable_only);
+        // Genuinely different strings are not confusable_only.
+        let t = score_pair("google", "gogle", 0.1);
+        assert!(!t.confusable_only);
+    }
+
+    #[test]
+    fn skeleton_normalized_guards_zero() {
+        // Two empty strings: a == b so confusable_only is false; norm fields 0.
+        let s = score_pair("", "", 0.1);
+        assert_eq!(s.skel_norm, 0.0);
+        assert!(!s.confusable_only);
     }
 }
