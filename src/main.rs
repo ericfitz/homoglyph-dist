@@ -123,7 +123,6 @@ enum Metric {
 }
 
 /// The distance used for thresholding/sorting, per the chosen metric.
-#[allow(dead_code)] // TODO(task-6): remove once used by arg parsing/thresholding
 fn metric_value(s: &Scores, m: Metric) -> f64 {
     match m {
         Metric::Homoglyph => s.hogl,
@@ -133,7 +132,6 @@ fn metric_value(s: &Scores, m: Metric) -> f64 {
 
 /// Sort results ascending by the active metric (most suspicious first) and
 /// optionally keep only the first `top`. Stable: ties preserve input order.
-#[allow(dead_code)] // TODO(task-7): remove once used by list mode
 fn sort_and_truncate(
     mut results: Vec<(String, String, Scores)>,
     metric: Metric,
@@ -146,6 +144,37 @@ fn sort_and_truncate(
     });
     if let Some(n) = top {
         results.truncate(n);
+    }
+    results
+}
+
+/// Score `string` against each non-blank line, applying threshold filtering
+/// (against `metric`) while collecting, then optionally sort/truncate.
+fn process_list<I: Iterator<Item = String>>(
+    string: &str,
+    lines: I,
+    hogl_weight: f64,
+    metric: Metric,
+    threshold: Option<f64>,
+    sort: bool,
+    top: Option<usize>,
+) -> Vec<(String, String, Scores)> {
+    let mut results: Vec<(String, String, Scores)> = Vec::new();
+    for raw in lines {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let s = score_pair(string, line, hogl_weight);
+        if let Some(t) = threshold {
+            if metric_value(&s, metric) > t {
+                continue;
+            }
+        }
+        results.push((string.to_string(), line.to_string(), s));
+    }
+    if sort || top.is_some() {
+        results = sort_and_truncate(results, metric, top);
     }
     results
 }
@@ -350,12 +379,33 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // Single-pair operands (list/stdin modes ignore these).
-    let a = opts.positionals.first().cloned().unwrap_or_default();
-    let b = opts.positionals.get(1).cloned().unwrap_or_default();
 
+    use std::io::{self, BufRead, Write};
+
+    // List mode: score --string against each line of --list, emit input/match JSONL.
+    if let (Some(string), Some(path)) = (opts.string.as_ref(), opts.list.as_ref()) {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: cannot open --list file {path:?}: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let lines = io::BufReader::new(file).lines().map_while(Result::ok);
+        let results = process_list(
+            string, lines, opts.hogl_weight, opts.metric,
+            opts.threshold, opts.sort, opts.top,
+        );
+        let stdout = io::stdout();
+        let mut out = io::BufWriter::new(stdout.lock());
+        for (a, b, s) in &results {
+            let _ = writeln!(out, "{}", result_json(a, b, s, ("input", "match")));
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    // Stdin batch mode: pre-paired lines, a/b JSONL.
     if opts.stdin {
-        use std::io::{self, BufRead, Write};
         let stdin = io::stdin();
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -367,7 +417,6 @@ fn main() -> ExitCode {
             if line.is_empty() {
                 continue;
             }
-            // Accept tab- or comma-separated pairs.
             let mut parts = line.splitn(2, |c| c == '\t' || c == ',');
             let (la, lb) = match (parts.next(), parts.next()) {
                 (Some(x), Some(y)) => (x, y),
@@ -377,27 +426,27 @@ fn main() -> ExitCode {
                 }
             };
             let s = score_pair(la, lb, opts.hogl_weight);
-            // In stdin mode we always emit JSON lines (one per pair) for easy parsing,
-            // optionally filtered by threshold.
             if let Some(t) = opts.threshold {
-                if s.hogl > t {
-                    continue; // only emit alerts at/under threshold
+                if metric_value(&s, opts.metric) > t {
+                    continue;
                 }
             }
-            let _ = writeln!(
-                out,
-                "{{\"a\":{:?},\"b\":{:?},\"levenshtein\":{},\"damerau\":{},\"homoglyph_damerau\":{},\"normalized\":{:.4},\"confusable_only\":{}}}",
-                la, lb, s.lev, s.dam, s.hogl, s.norm, s.confusable_only
-            );
+            let _ = writeln!(out, "{}", result_json(la, lb, &s, ("a", "b")));
         }
         return ExitCode::SUCCESS;
     }
 
-    let s = score_pair(&a, &b, opts.hogl_weight);
-    emit(&a, &b, &s, opts.json);
-
+    // Single-pair mode.
+    let a = &opts.positionals[0];
+    let b = &opts.positionals[1];
+    let s = score_pair(a, b, opts.hogl_weight);
+    emit(a, b, &s, opts.json);
     if let Some(t) = opts.threshold {
-        return if s.hogl <= t { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+        return if metric_value(&s, opts.metric) <= t {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
     }
     ExitCode::SUCCESS
 }
@@ -626,5 +675,31 @@ mod tests {
         assert!(o.list.is_none());
         assert!(!o.stdin);
         assert_eq!(o.metric, Metric::Skeleton); // default
+    }
+
+    #[test]
+    fn process_list_filters_sorts_caps() {
+        let lines = vec![
+            "paypal".to_string(),     // identical -> skel 0
+            "p\u{0430}ypal".to_string(), // homoglyph -> skel 0, confusable_only
+            "completely-different".to_string(),
+        ];
+        // No threshold, sort by skeleton, top 2: the two zero-distance lines.
+        let out = process_list("paypal", lines.clone().into_iter(), 0.1,
+                               Metric::Skeleton, None, true, Some(2));
+        assert_eq!(out.len(), 2);
+        assert!(metric_value(&out[0].2, Metric::Skeleton).abs() < 1e-9);
+        assert!(metric_value(&out[1].2, Metric::Skeleton).abs() < 1e-9);
+
+        // Threshold filters: only skeleton distance <= 0.0 kept (the 2 matches).
+        let out2: Vec<_> = process_list("paypal", lines.into_iter(), 0.1,
+                                        Metric::Skeleton, Some(0.0), false, None);
+        assert_eq!(out2.len(), 2);
+
+        // Blank lines are skipped.
+        let out3 = process_list("paypal",
+            vec!["".to_string(), "  ".to_string(), "paypal".to_string()].into_iter(),
+            0.1, Metric::Skeleton, None, false, None);
+        assert_eq!(out3.len(), 1);
     }
 }
