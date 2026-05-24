@@ -132,13 +132,30 @@ define — `rn↔m` (only this is in UTS#39, via m's skeleton), plus `vv↔w`,
 (`fi`, `fl`, `ff`, `oe`, `ae`, `ij`, ...). This is the gap that made
 `devflovv`/`devflow` read as benign.
 
-**Authoritative? No — inherently curated/heuristic.** No standard enumerates
-ASCII digraph confusables. The best citable precedent is **dnstwist's
-`glyphs_ascii`** (Apache-2.0): a ~48-entry table that already contains exactly
-`'rn':('m',)`, `'cl':('d',)`, `'vv':('w',)`, `'m':('n','nn','rn')`, etc.
-Directly reusable with attribution. Other homoglyph libs (confusable_homoglyphs,
-life4/homoglyphs, codebox/homoglyph — all MIT) wrap only Unicode data and add no
-digraph pairs.
+**Authoritative? No — inherently curated/heuristic, BUT standards-acknowledged.**
+No standard *enumerates* ASCII digraph confusables, and (key new finding) **no
+source empirically validates them with a human-perception study** — the
+ShamFinder MTurk study and every pixel-similarity dataset are single-character
+only. However, the *phenomenon* is explicitly acknowledged by the Unicode
+standard: **UTR#36 §2.3 ("Single-Script Spoofing")** states verbatim that "the
+sequence 'rn' ... is visually confusable with 'm' in many sans-serif fonts," and
+**UTS#39 §5.4** names "detecting two distinct sequences that have identical
+representations" as a recognized gap / optional future enhancement not covered by
+the current data files. So a digraph axis fills a hole the standard itself flags
+— but the standard provides **no data** for it.
+
+The best citable data precedent remains **dnstwist's `glyphs_ascii`**
+(Apache-2.0): a ~48-entry table containing exactly `'rn':('m',)`, `'cl':('d',)`,
+`'vv':('w',)`, `'m':('n','nn','rn')`, etc. Directly reusable with attribution.
+Other homoglyph libs (confusable_homoglyphs, life4/homoglyphs, codebox/homoglyph,
+**FlowCrypt idn-homographs-database** [MIT, ~13K pairs], **ShamFinder SimChar**
+[no license — unusable]) are all **single-char only** and add NO digraph pairs —
+useful only for *single-char* confusable supplementation, not this axis.
+
+**Font-dependence (new):** UTR#36 and ShamFinder both stress confusability is a
+rendering artifact. `rn`→`m` specifically is a *proportional-font kerning*
+effect (the two glyphs visually merge) and is largely absent in monospace/bitmap
+fonts. This argues for a short-name / context gate rather than blanket matching.
 
 **The false-positive problem (must be designed around):**
 - `cl→d` is a **minefield**: `clear`/`dear`, `clock`/`dock`, `clap`/`dap`. Common
@@ -147,8 +164,19 @@ digraph pairs.
 - Mitigations the design must adopt: gate digraph matching to when the
   surrounding skeleton edit distance is tiny (≤1 sub); only ever flag against
   *real registry names* (finite set), not arbitrary strings; a minimum-length
-  floor; and a per-pair allow/deny list so `cl↔d` can be disabled. Precedent:
-  libu8ident needs manual exceptions even for the ASCII confusables range.
+  floor; a short-name / font-context gate (digraph merging is a small-size
+  proportional-font effect — UTR#36); and a per-pair allow/deny list so `cl↔d`
+  can be disabled. Precedent: libu8ident needs manual exceptions even for the
+  ASCII confusables range.
+- **Same-script gating (from ICANN IDN Implementation Guidelines):** the
+  registry world's primary confusable-FP control is the *same-script
+  requirement* — a label's code points must all come from one script, so
+  cross-script confusion is prevented by exclusion. Borrowable here: digraph
+  confusions like `rn`/`m` are intra-ASCII-Latin, so only apply the digraph
+  check to single-script Latin strings; if the pair is already flagged
+  mixed-script (Axis 1), the digraph check is redundant. (ICANN's mechanism is
+  prevention-by-exclusion, not detection; as a *detector* sqdist must score/rank
+  instead, but the same-script scoping principle transfers.)
 
 **Design recommendation — merge vs separate axis:** extend the **skeleton
 mechanism** with curated multi-char entries (so `rn`→`m` collapses in the
@@ -161,11 +189,31 @@ axes consume whatever the skeleton map contains; the flag controls whether
 supplemental entries are in the map for a given run. Provenance (dnstwist /
 Apache-2.0) recorded in the generated table.
 
+The opt-in-flag decision is *reinforced* by the new research: because digraph
+confusability is curated/heuristic, font-dependent, AND lacks any empirical
+human-perception validation (unlike single-char confusables, which ShamFinder
+validated via MTurk), keeping it off the default path is the conservative,
+defensible choice — the pure-UTS#39 default stays evidence-backed.
+
 **Effort:** small to import the table; medium for the longest-match-first
 multi-char skeleton rewrite + FP tuning against real npm/PyPI/crates name lists.
 
-Sources: dnstwist `glyphs_ascii` (Apache-2.0), confusables.txt v16, the
-confusables-vs-NFKC conflict writeup, libu8ident exceptions, TypoSmart (arXiv).
+**Possible companion (single-char, separate from digraphs):** the FlowCrypt
+idn-homographs-database (MIT, ShamFinder-derived, ~13K single-char pairs,
+human-validated method) could supplement the *single-char* UTS#39 coverage under
+the same opt-in flag — but it's 18.4 MB and IDN/cross-script focused, so it would
+need filtering to the relevant subset. Tracked as a separate possibility, not
+part of the digraph axis.
+
+Sources: dnstwist `glyphs_ascii` (Apache-2.0); **UTR#36 v15 §2.3, §2.10** (Unicode
+License — acknowledges `rn`/`m`, restriction levels, allowlist/casefold/NFKC FP
+controls); **UTS#39 §5.4** (sequence-confusable gap); **ICANN IDN Implementation
+Guidelines 2012** (same-script requirement, variant tables — ICANN terms, data
+not reused); **FlowCrypt idn-homographs-database** (MIT, single-char only);
+**ShamFinder / SimChar**, Suzuki et al., IMC 2019, DOI 10.1145/3355369.3355587
+(single-char only, no license — method portable but data unusable; no digraph
+validation); confusables.txt v16; confusables-vs-NFKC conflict writeup;
+libu8ident exceptions; TypoSmart (arXiv).
 
 ---
 
