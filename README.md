@@ -207,6 +207,7 @@ skeleton_damerau         0
 uts39_confusable_count   1
 uts39_skeleton_delta     1
 confusable_only          true
+script_restriction       4
 
 [LIKELY SPOOF] The strings differ by 1 edit, but every differing character is a homoglyph (the strings are visually identical). High likelihood of an attempt to confuse.
 ```
@@ -218,7 +219,7 @@ sqdist -j paypal pаypal   # second 'a' is Cyrillic
 ```
 
 ```json
-{"a":"paypal","b":"pаypal","equal":false,"levenshtein":1,"damerau":1,"skeleton_levenshtein":0,"skeleton_damerau":0,"uts39_confusable_count":1,"uts39_skeleton_delta":1,"confusable_only":true}
+{"a":"paypal","b":"pаypal","equal":false,"levenshtein":1,"damerau":1,"skeleton_levenshtein":0,"skeleton_damerau":0,"uts39_confusable_count":1,"uts39_skeleton_delta":1,"confusable_only":true,"script_restriction":4}
 ```
 
 ### Selecting axes
