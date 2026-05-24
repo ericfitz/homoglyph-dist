@@ -52,7 +52,7 @@ AXES:
     skeleton_damerau        damerau after reducing both to UTS#39 skeletons
                             (~0 when visually identical, incl. multi-char confusables)
     uts39_confusable_count  # of aligned substitutions that are UTS#39-confusable (experimental)
-    uts39_skeleton_delta    damerau - skeleton_damerau; edits that vanish under
+    uts39_skeleton_delta    calculated as (damerau - skeleton_damerau); edits that vanish under
                             skeletonization (experimental, may change)
     confusable_only         true when the strings differ but share an identical skeleton
     script_restriction      UTS#39 restriction level 0-5 (higher = more mixed-script/suspicious)
@@ -188,7 +188,7 @@ piece is also fine — results are independent per line.)
 | `skeleton_levenshtein` | int | levenshtein after reducing both to UTS#39 skeletons |
 | `skeleton_damerau` | int | damerau after reducing both to UTS#39 skeletons; ~0 when visually identical including multi-char confusables |
 | `uts39_confusable_count` | int | # of aligned substitutions that are UTS#39-confusable **(experimental)** |
-| `uts39_skeleton_delta` | int | damerau − skeleton_damerau; edits that vanish under skeletonization **(experimental)** |
+| `uts39_skeleton_delta` | int | calculated as (damerau − skeleton_damerau); edits that vanish under skeletonization **(experimental)** |
 | `confusable_only` | bool | true when strings differ but share an identical skeleton — highest-confidence spoof signal |
 | `script_restriction` | int | UTS#39 restriction level 0–5 of the pair (max of the two strings' levels); higher = more mixed-script and more suspicious. Direction: higher = more different/suspicious. |
 | `keyboard_distance` | float\|null | mean physical US-QWERTY key distance over the substituted positions, normalized to [0,1]; near 0 = adjacent-key fat-finger typo, near 1 = far-apart/deliberate. Direction: higher = more different/suspicious. NA (JSON `null`, human `n/a`) when either string contains a non-ASCII character (keyboard distance is undefined there); zero substitutions = 0.0 (accurate). Self-contained QWERTY table (`src/keyboard.rs`); no dependency. |
@@ -350,7 +350,7 @@ sqdist -j --confusables uts39,digraph devflovv devflow
 The `flowcrypt` source is derived from the
 [FlowCrypt idn-homographs-database](https://github.com/FlowCrypt/idn-homographs-database),
 licensed under the MIT License. The embedded data is pinned to commit `f27b783`
-(retrieved 2021-05-26).
+(dated 2021-05-26, retrieved 2026-05-24).
 
 ## Installing
 
