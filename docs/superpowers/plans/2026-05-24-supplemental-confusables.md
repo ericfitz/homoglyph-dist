@@ -463,9 +463,15 @@ Add the 4-entry digraph table and make `from_sources` include it when `digraph` 
 //! FP note for future maintainers (mitigations NOT built — the opt-in is the
 //! consent): cl->d is the highest-FP rule (clear->dear, clock->dock). If FP
 //! complaints arise, the menu is: same-script-Latin gating; a short-name /
-//! font-context gate (rn->m is a small-size proportional-font merging effect); a
+//! font-context gate (rn/m is a small-size proportional-font merging effect); a
 //! per-pair deny list; tiny-edit-distance gating. See the research/design docs.
-pub static DIGRAPHS: &[(&str, &str)] = &[("vv", "w"), ("cl", "d"), ("rn", "m"), ("nn", "m")];
+//!
+//! ANCHORED TO UTS#39: each replacement is the UTS#39 skeleton of the impersonated
+//! char, so the digraph unifies with it. UTS#39 maps m -> "rn", so "looks-like-m"
+//! digraphs map to "rn": nn -> "rn". rn -> m is OMITTED — UTS#39 already unifies
+//! rn<->m via m->rn; the inverse digraph would break rnicrosoft/microsoft. w/d are
+//! unmapped in UTS#39, so vv -> "w" / cl -> "d" unify directly.
+pub static DIGRAPHS: &[(&str, &str)] = &[("vv", "w"), ("cl", "d"), ("nn", "rn")];
 ```
 
 - [ ] **Step 2: Add the failing test in `src/confusables.rs`**
@@ -475,14 +481,23 @@ Add to the `tests` module:
     #[test]
     fn digraph_source_closes_gaps_when_enabled() {
         let m = ConfusableMap::from_sources(&Sources { flowcrypt: false, digraph: true });
-        // vv->w, cl->d, nn->m close; m->rn from uts39 still holds.
+        // vv->w, cl->d close; nn anchors to m's UTS#39 skeleton "rn" so nn==m.
         assert_eq!(m.skeleton("vv"), m.skeleton("w"));
         assert_eq!(m.skeleton("devflovv"), m.skeleton("devflow"));
         assert_eq!(m.skeleton("cl"), m.skeleton("d"));
-        assert_eq!(m.skeleton("nn"), m.skeleton("m"));
+        assert_eq!(m.skeleton("nn"), m.skeleton("m")); // both -> "rn"
+        assert_eq!(m.skeleton("rn"), m.skeleton("m")); // UTS#39 m->rn handles rn<->m
         // Default (digraph off) still has the gap (regression).
         let d = ConfusableMap::uts39();
         assert_ne!(d.skeleton("vv"), d.skeleton("w"));
+    }
+
+    #[test]
+    fn digraph_does_not_break_uts39_rn_m() {
+        // rn<->m must STILL unify with digraph enabled (we omit the inverting
+        // rn->m entry precisely to preserve UTS#39's m->rn).
+        let m = ConfusableMap::from_sources(&Sources { flowcrypt: false, digraph: true });
+        assert_eq!(m.skeleton("rnicrosoft"), m.skeleton("microsoft"));
     }
 
     #[test]

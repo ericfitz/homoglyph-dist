@@ -3,7 +3,7 @@
 Date: 2026-05-24
 Status: Approved
 Component: `sqdist` — adds opt-in non-UTS#39 confusable data (FlowCrypt single-char
-supplement + 4 curated digraphs) behind a `--confusables=<list>` source selector,
+supplement + 3 curated digraphs) behind a `--confusables=<list>` source selector,
 by source-parameterizing the skeleton lookup. Builds on v0.3.0. **Not a new axis.**
 
 ## Summary
@@ -15,7 +15,7 @@ an active `ConfusableMap` (single-char map + digraph list) is built from the
 sources selected by a new `--confusables=<comma-list>` flag (default `uts39`) and
 threaded through `PairContext`. Two supplemental sources are added — `flowcrypt`
 (single-char, from FlowCrypt's MIT homograph DB, anchored to UTS#39) and `digraph`
-(4 hand-curated multi-char mappings). When enabled, their entries enter the active
+(3 hand-curated multi-char mappings, also anchored to UTS#39). When enabled, their entries enter the active
 map and every existing skeleton axis benefits automatically.
 
 **No new axis, metric, verdict logic, or `AxisValue` variant.** The only structural
@@ -30,8 +30,9 @@ Default `uts39`. Recognized sources:
 - `uts39` — the standard UTS#39 data (always implicitly on; including it explicitly
   is a no-op, omitting it does NOT disable it — UTS#39 is the authoritative base).
 - `flowcrypt` — single-char supplement (FlowCrypt MIT DB, filtered + UTS#39-anchored).
-- `digraph` — the 4 curated digraph→single-char mappings (`vv→w`, `cl→d`, `rn→m`,
-  `nn→m`).
+- `digraph` — the 3 curated digraph mappings, anchored to UTS#39 skeletons:
+  `vv→w`, `cl→d`, `nn→rn` (rn↔m is already handled by UTS#39's `m→rn`, so no
+  `rn→m` entry — see the digraph_data.rs note).
 
 Parsed/validated like `--fields`/`--metric`: split on commas, trim, dedup; unknown
 source → error naming the offender and listing valid sources (`uts39, flowcrypt,
@@ -123,19 +124,36 @@ confusable model — and the move is small.)
 ## Data / generators
 
 ### `digraph` — hand-written, no generator
-`src/digraph_data.rs`:
+`src/digraph_data.rs`. **3 curated entries, each anchored to the UTS#39 skeleton of
+its single-char target** (so they unify with UTS#39 rather than fight it):
 ```rust
-//! Curated digraph -> single-char confusable mappings (non-UTS#39, opt-in via
+//! Curated digraph -> skeleton mappings (non-UTS#39, opt-in via
 //! --confusables=digraph). Seeded by dnstwist's glyphs_ascii (Apache-2.0); this
-//! short curated list is our own. One-way (digraph impersonates the single char).
+//! short curated list is our own. One-way (digraph impersonates a single char).
+//!
+//! ANCHORED TO UTS#39: each replacement is the UTS#39 skeleton of the char the
+//! digraph impersonates, so the digraph unifies with that char under the
+//! single-pass skeletonizer. UTS#39 maps `m -> "rn"`, so "looks-like-m" digraphs
+//! map to "rn" (NOT "m"): `nn -> "rn"` makes skeleton("nn") == skeleton("m").
+//! `rn -> m` is intentionally OMITTED — UTS#39 already unifies rn<->m via m->rn;
+//! adding the inverse digraph would make skeleton("rnicrosoft") != skeleton("microsoft")
+//! and BREAK that detection. `w`/`d` are unmapped in UTS#39 (skeleton to themselves),
+//! so `vv -> "w"` / `cl -> "d"` unify with w/d directly.
 //!
 //! FP note for future maintainers: cl->d is the highest-FP rule (clear->dear,
 //! clock->dock). If FP complaints arise, the menu of mitigations (NOT built now,
 //! the opt-in is the consent): same-script-Latin gating, a short-name/font-context
-//! gate (rn->m is a small-size proportional-font effect), a per-pair deny list,
+//! gate (rn/m is a small-size proportional-font effect), a per-pair deny list,
 //! and tiny-edit-distance gating. See the research doc.
-pub static DIGRAPHS: &[(&str, &str)] = &[("vv", "w"), ("cl", "d"), ("rn", "m"), ("nn", "m")];
+pub static DIGRAPHS: &[(&str, &str)] = &[("vv", "w"), ("cl", "d"), ("nn", "rn")];
 ```
+
+> **Correction during implementation (2026-05-24):** the research's "4 digraphs
+> `vv→w/cl→d/rn→m/nn→m`" did not survive contact with single-pass skeletonization.
+> Because UTS#39 canonicalizes `m → "rn"`, a literal `rn→m`/`nn→m` mapping inverts
+> UTS#39 and breaks `rnicrosoft`/`microsoft` unification. The fix (same "anchor to
+> UTS#39" principle used for FlowCrypt): drop `rn→m` (UTS#39 owns rn↔m), and map
+> `nn → "rn"` (m's skeleton). Net set is 3 entries; rn↔m still works via UTS#39.
 
 ### `flowcrypt` — generated from the FlowCrypt MIT DB
 `scripts/gen_flowcrypt.py` (pure stdlib, like `gen_confusables.py`) → emits
@@ -272,9 +290,13 @@ menu without speculative logic shipped now.
 - Source parsing: `uts39` default; `uts39,flowcrypt,digraph` all-on; unknown source
   → error listing valid names; dedup; empty → uts39.
 - `digraph` enabled: `skeleton("vv") == skeleton("w")` and `skeleton("devflovv")
-  == skeleton("devflow")` (the vv/w gap CLOSES under `digraph`); `cl→d`, `nn→m`
+  == skeleton("devflow")` (the vv/w gap CLOSES under `digraph`); `cl==d`,
+  `skeleton("nn") == skeleton("m")` (both `"rn"`, via the `nn→rn` anchoring)
   likewise. With `digraph` DISABLED (default), the vv/w gap STAYS (regression
-  pin from Phase 1 — `skeleton("vv") != skeleton("w")` by default).
+  pin from Phase 1 — `skeleton("vv") != skeleton("w")` by default). **Plus a
+  regression test that `digraph` does NOT break UTS#39's rn↔m: `skeleton("rnicrosoft")
+  == skeleton("microsoft")` must still hold with `digraph` enabled** (we omit the
+  inverting `rn→m` entry precisely to preserve this).
 - `flowcrypt` enabled: a FlowCrypt-only look-alike char collapses to its ASCII
   partner's skeleton (pick a concrete pair from the generated table); UTS#39
   precedence — a char defined by both resolves to the UTS#39 skeleton.
