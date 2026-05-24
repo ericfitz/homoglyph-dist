@@ -6,6 +6,7 @@
 mod axes;
 mod confusables_data;
 mod distance;
+mod verdict;
 
 use std::env;
 use std::process::ExitCode;
