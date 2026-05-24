@@ -280,6 +280,72 @@ impl Axis for ConfusableOnly {
     }
 }
 
+/// The full list of axis keys in canonical order.
+pub fn all_keys() -> Vec<&'static str> {
+    ALL_AXES.iter().map(|ax| ax.key()).collect()
+}
+
+/// The two boolean axes are not valid numeric metrics.
+fn is_bool_axis(key: &str) -> bool {
+    matches!(key, "equal" | "confusable_only")
+}
+
+/// Keys of numeric (Int/Float) axes — the valid `--metric` targets.
+pub fn numeric_keys() -> Vec<&'static str> {
+    ALL_AXES
+        .iter()
+        .map(|ax| ax.key())
+        .filter(|k| !is_bool_axis(k))
+        .collect()
+}
+
+/// Parse a comma-separated field list into canonical-ordered, de-duplicated
+/// axis keys. Errors (naming the offender + valid keys) on any unknown field.
+pub fn parse_fields(spec: &str) -> Result<Vec<&'static str>, String> {
+    let keys = all_keys();
+    let mut seen = vec![false; keys.len()];
+    for raw in spec.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match keys.iter().position(|k| *k == name) {
+            Some(i) => seen[i] = true,
+            None => {
+                return Err(format!(
+                    "unknown field: {name} (valid: {})",
+                    keys.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(keys
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| seen[*i])
+        .map(|(_, k)| k)
+        .collect())
+}
+
+/// Validate a `--metric` key: must be a known numeric axis. Bool axes and
+/// unknown keys are rejected with a message listing valid numeric keys.
+pub fn validate_metric(key: &str) -> Result<&'static str, String> {
+    let numeric = numeric_keys();
+    match numeric.iter().find(|k| **k == key) {
+        Some(k) => Ok(*k),
+        None => Err(format!(
+            "invalid --metric: {key} (valid numeric axes: {})",
+            numeric.join(", ")
+        )),
+    }
+}
+
+/// The numeric value of `key` in a computed panel, for `-t`/`--sort`. None for
+/// bool axes or missing keys.
+pub fn metric_value(panel: &Panel, key: &str) -> Option<f64> {
+    panel.get(key).and_then(|v| v.as_f64())
+}
+
 /// Every axis in canonical order — the single source of truth for JSON keys,
 /// human-row order, and `--fields`/`--metric` validation.
 pub static ALL_AXES: &[&dyn Axis] = &[
@@ -484,5 +550,53 @@ mod tests {
         p.entries.push(("damerau", AxisValue::Int(2)));
         assert_eq!(p.get("damerau"), Some(AxisValue::Int(2)));
         assert_eq!(p.get("missing"), None);
+    }
+
+    #[test]
+    fn parse_fields_canonical_order_and_dedup() {
+        // User order ignored; canonical order enforced; dups collapse.
+        let f = parse_fields("confusable_only,damerau,damerau").unwrap();
+        assert_eq!(f, vec!["damerau", "confusable_only"]);
+    }
+
+    #[test]
+    fn parse_fields_all_keys() {
+        let all = parse_fields(
+            "equal,levenshtein,damerau,skeleton_levenshtein,skeleton_damerau,uts39_confusable_count,uts39_skeleton_delta,confusable_only",
+        )
+        .unwrap();
+        assert_eq!(all.len(), 8);
+    }
+
+    #[test]
+    fn parse_fields_rejects_unknown() {
+        let e = parse_fields("damerau,bogus").unwrap_err();
+        assert!(e.contains("bogus"), "must name the offender: {e}");
+        assert!(e.contains("levenshtein"), "must list valid keys: {e}");
+    }
+
+    #[test]
+    fn metric_accepts_numeric_keys() {
+        assert!(validate_metric("skeleton_damerau").is_ok());
+        assert!(validate_metric("levenshtein").is_ok());
+        assert!(validate_metric("uts39_confusable_count").is_ok());
+    }
+
+    #[test]
+    fn metric_rejects_bool_and_unknown_keys() {
+        let e = validate_metric("equal").unwrap_err();
+        assert!(e.contains("equal"));
+        assert!(validate_metric("confusable_only").is_err());
+        let u = validate_metric("nope").unwrap_err();
+        assert!(u.contains("nope"));
+    }
+
+    #[test]
+    fn metric_value_reads_panel() {
+        let p = run("paypal", "p\u{0430}ypal");
+        // skeleton_damerau is 0 for a pure homoglyph spoof.
+        assert_eq!(metric_value(&p, "skeleton_damerau"), Some(0.0));
+        // bool axis -> None (not a metric).
+        assert_eq!(metric_value(&p, "equal"), None);
     }
 }
