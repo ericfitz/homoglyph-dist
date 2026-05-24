@@ -12,9 +12,11 @@ use unicode_security::{RestrictionLevel, RestrictionLevelDetection};
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AxisValue {
     Int(u64),
-    #[allow(dead_code)] // Float-valued axes arrive in Phase 3 (keyboard-distance)
     Float(f64),
     Bool(bool),
+    /// The axis is not applicable to this pair (e.g. keyboard_distance on
+    /// non-ASCII input). Renders as JSON null / human "n/a".
+    NA,
 }
 
 impl AxisValue {
@@ -24,21 +26,26 @@ impl AxisValue {
             AxisValue::Int(n) => n.to_string(),
             AxisValue::Float(f) => format!("{f:.4}"),
             AxisValue::Bool(b) => b.to_string(),
+            AxisValue::NA => "null".to_string(),
         }
     }
 
-    /// Human rendering — identical to JSON for the v0.3.0 panel.
+    /// Human rendering — delegates to to_json except NA renders as "n/a".
     pub fn to_human(self) -> String {
-        self.to_json()
+        match self {
+            AxisValue::NA => "n/a".to_string(),
+            other => other.to_json(),
+        }
     }
 
-    /// Numeric coercion for `--metric`/`--sort`/`-t`. Bools return None and are
-    /// rejected as metric targets.
+    /// Numeric coercion for `--metric`/`--sort`/`-t`. Bools and NA return None
+    /// and are rejected as metric targets.
     pub fn as_f64(self) -> Option<f64> {
         match self {
             AxisValue::Int(n) => Some(n as f64),
             AxisValue::Float(f) => Some(f),
             AxisValue::Bool(_) => None,
+            AxisValue::NA => None,
         }
     }
 }
@@ -315,6 +322,48 @@ impl Axis for ScriptRestriction {
     }
 }
 
+struct KeyboardDistance;
+impl Axis for KeyboardDistance {
+    fn key(&self) -> &'static str {
+        "keyboard_distance"
+    }
+    fn direction(&self) -> Direction {
+        Direction::HigherMoreDifferent
+    }
+    fn phase(&self) -> Phase {
+        Phase::Base
+    }
+    fn compute(&self, ctx: &PairContext, _base: &Panel) -> AxisValue {
+        // Undefined for non-ASCII: emitting 0.0 would falsely imply key proximity.
+        if !ctx.a.is_ascii() || !ctx.b.is_ascii() {
+            return AxisValue::NA;
+        }
+        // Mean Euclidean key distance over substituted alignment positions,
+        // ASCII-folded (case shares a key), skipping any unmappable char.
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for op in &ctx.align {
+            if let crate::distance::AlignOp::Sub(i, j) = op {
+                let ca = ctx.ca[*i].to_ascii_lowercase();
+                let cb = ctx.cb[*j].to_ascii_lowercase();
+                if let (Some((x1, y1)), Some((x2, y2))) = (
+                    crate::keyboard::key_coord(ca),
+                    crate::keyboard::key_coord(cb),
+                ) {
+                    sum += ((x1 - x2).powi(2) + (y1 - y2).powi(2)).sqrt();
+                    count += 1;
+                }
+            }
+        }
+        if count == 0 {
+            return AxisValue::Float(0.0);
+        }
+        let mean = sum / count as f32;
+        let normalized = (mean / crate::keyboard::max_key_distance()).clamp(0.0, 1.0);
+        AxisValue::Float(normalized as f64)
+    }
+}
+
 /// The full list of axis keys in canonical order.
 pub fn all_keys() -> Vec<&'static str> {
     ALL_AXES.iter().map(|ax| ax.key()).collect()
@@ -393,6 +442,7 @@ pub static ALL_AXES: &[&dyn Axis] = &[
     &Uts39SkeletonDelta,
     &ConfusableOnly,
     &ScriptRestriction,
+    &KeyboardDistance,
 ];
 
 /// Run the panel: phase 1 computes every base axis into the map (registry
@@ -446,6 +496,7 @@ mod tests {
                 "uts39_skeleton_delta",
                 "confusable_only",
                 "script_restriction",
+                "keyboard_distance",
             ]
         );
     }
@@ -455,8 +506,8 @@ mod tests {
         let p = run("abc", "abd");
         let keys: Vec<&str> = p.entries.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys.first(), Some(&"equal"));
-        assert_eq!(keys.last(), Some(&"script_restriction"));
-        assert_eq!(keys.len(), 9);
+        assert_eq!(keys.last(), Some(&"keyboard_distance"));
+        assert_eq!(keys.len(), 10);
     }
 
     #[test]
@@ -695,10 +746,10 @@ mod tests {
     }
 
     #[test]
-    fn script_restriction_is_last_and_registry_has_nine() {
+    fn script_restriction_is_second_to_last_and_registry_has_ten() {
         let keys: Vec<&str> = ALL_AXES.iter().map(|ax| ax.key()).collect();
-        assert_eq!(keys.len(), 9);
-        assert_eq!(keys.last(), Some(&"script_restriction"));
+        assert_eq!(keys.len(), 10);
+        assert_eq!(keys[8], "script_restriction");
     }
 
     #[test]
@@ -710,5 +761,75 @@ mod tests {
         assert_eq!(ax.direction(), Direction::HigherMoreDifferent);
         assert!(validate_metric("script_restriction").is_ok());
         assert!(numeric_keys().contains(&"script_restriction"));
+    }
+
+    #[test]
+    fn axis_value_na_renders() {
+        assert_eq!(AxisValue::NA.to_json(), "null");
+        assert_eq!(AxisValue::NA.to_human(), "n/a");
+        assert_eq!(AxisValue::NA.as_f64(), None);
+    }
+
+    #[test]
+    fn keyboard_distance_identical_is_zero() {
+        assert_eq!(
+            run("google", "google").get("keyboard_distance"),
+            Some(AxisValue::Float(0.0))
+        );
+    }
+
+    #[test]
+    fn keyboard_distance_pure_insert_delete_is_zero() {
+        assert_eq!(
+            run("gogle", "google").get("keyboard_distance"),
+            Some(AxisValue::Float(0.0))
+        );
+    }
+
+    #[test]
+    fn keyboard_distance_non_ascii_is_na() {
+        assert_eq!(
+            run("paypal", "p\u{0430}ypal").get("keyboard_distance"),
+            Some(AxisValue::NA)
+        );
+    }
+
+    #[test]
+    fn keyboard_distance_adjacent_less_than_distant() {
+        let adjacent = match run("gigle", "gogle").get("keyboard_distance") {
+            Some(AxisValue::Float(f)) => f,
+            other => panic!("expected Float, got {other:?}"),
+        };
+        let distant = match run("gqgle", "gogle").get("keyboard_distance") {
+            Some(AxisValue::Float(f)) => f,
+            other => panic!("expected Float, got {other:?}"),
+        };
+        assert!(adjacent > 0.0, "adjacent sub should be > 0, got {adjacent}");
+        assert!(
+            adjacent < distant,
+            "adjacent ({adjacent}) should be < distant ({distant})"
+        );
+        assert!(
+            distant <= 1.0,
+            "normalized distance must be <= 1, got {distant}"
+        );
+    }
+
+    #[test]
+    fn keyboard_distance_is_last_and_registry_has_ten() {
+        let keys: Vec<&str> = ALL_AXES.iter().map(|ax| ax.key()).collect();
+        assert_eq!(keys.len(), 10);
+        assert_eq!(keys.last(), Some(&"keyboard_distance"));
+    }
+
+    #[test]
+    fn keyboard_distance_direction_and_numeric() {
+        let ax = ALL_AXES
+            .iter()
+            .find(|ax| ax.key() == "keyboard_distance")
+            .unwrap();
+        assert_eq!(ax.direction(), Direction::HigherMoreDifferent);
+        assert!(validate_metric("keyboard_distance").is_ok());
+        assert!(numeric_keys().contains(&"keyboard_distance"));
     }
 }

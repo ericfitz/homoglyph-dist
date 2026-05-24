@@ -8,6 +8,7 @@
 mod axes;
 mod confusables_data;
 mod distance;
+mod keyboard;
 mod verdict;
 
 use axes::{
