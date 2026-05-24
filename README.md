@@ -93,6 +93,7 @@ OPTIONS:
                             sets exit code. Batch: filters output; exit 1 if none match.
     -m, --metric <AXIS>     Numeric axis for -t and --sort (default skeleton_damerau)
         --fields <LIST>     Comma-separated axes to show (default: all). See AXES.
+        --confusables <LIST> Confusable sources for skeletons: uts39,flowcrypt,digraph (default uts39)
         --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)
     -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL
         --string <S>        (with --list) the single string to compare
@@ -293,22 +294,63 @@ distance. The classic example is the letter **m**, whose UTS#39 skeleton is
 This surfaces in the `skeleton_damerau` field (~0 for a pure multi-char spoof)
 and sets `confusable_only` to `true`, even when the strings differ in length.
 
-### What is *not* caught
+### What UTS#39 alone does *not* catch — and how to close the gap
 
-sqdist only knows the confusables that **UTS#39 itself defines**. Some
-visually-plausible multi-character spoofs are **not** in the Unicode data and
-are therefore reported as ordinary edits (`confusable_only` false), e.g.:
+UTS#39 keys its multi-character skeletons on a small set of single code points
+(among ASCII letters, essentially just `m` → `rn`); it does not provide reverse
+`vv → w` style mappings. By default sqdist uses only pure UTS#39, so these three
+spoofs are reported as ordinary edits (`confusable_only` false):
 
 - `vv` ≈ `w`
 - `cl` ≈ `d`
-- `nn` ≈ `m`
+- `nn` ≈ `m` (note: `rn` ≈ `m` *is* caught — see above)
 
-UTS#39 keys its multi-character skeletons on a small set of single code points
-(among ASCII letters, essentially just `m` → `rn`); it does not provide the
-reverse `vv → w` style mappings. Supplementing the official data with a curated
-table of these pairs is a candidate future enhancement. Leetspeak substitutions
-(`3`→`e`, `4`→`a`) are deliberately excluded — UTS#39 does not consider them
-visually confusable.
+**These gaps are closable via `--confusables=digraph`** (see Supplemental
+confusables below). The digraph source adds exactly those three curated mappings.
+Leetspeak substitutions (`3`→`e`, `4`→`a`) are deliberately excluded — UTS#39
+does not consider them visually confusable and sqdist follows that policy.
+
+## Supplemental confusables
+
+`--confusables <LIST>` selects which confusable sources are active during
+skeleton computation. The value is a comma-separated list; the default is
+`uts39`.
+
+| Source | Description | Default |
+|---|---|---|
+| `uts39` | Unicode UTS#39 confusables data (authoritative, ~6565 entries). Always included. | yes |
+| `flowcrypt` | FlowCrypt `idn-homographs-database` single-char supplement — 477 ASCII-base look-alikes anchored to UTS#39 skeletons. MIT-licensed. | no (opt-in) |
+| `digraph` | Three curated multi-char mappings: `vv→w`, `cl→d`, `nn→rn`. Closes the three most common UTS#39 multi-char gaps. | no (opt-in) |
+
+An unknown source name is an error (exit 2).
+
+**The default is pure UTS#39 — unchanged from prior releases.** The supplemental
+sources are opt-in and less authoritative. In particular, `cl→d` has a higher
+false-positive rate (`clear` matches `dear`), so use the `digraph` source with
+that caveat in mind. UTS#39 always wins on any collision.
+
+**The skeleton axes (`skeleton_levenshtein`, `skeleton_damerau`,
+`confusable_only`) reflect whichever sources are enabled.** Changing
+`--confusables` changes the behavior of those three axes.
+
+### Worked example: closing the vv/w gap
+
+```sh
+# Default (pure UTS#39): vv is not a known confusable for w
+sqdist -j devflovv devflow
+# → "confusable_only":false, "skeleton_damerau":2
+
+# With digraph source: vv→w mapping is active, gap closes
+sqdist -j --confusables uts39,digraph devflovv devflow
+# → "confusable_only":true, "skeleton_damerau":0
+```
+
+### FlowCrypt attribution
+
+The `flowcrypt` source is derived from the
+[FlowCrypt idn-homographs-database](https://github.com/FlowCrypt/flowcrypt-security/tree/main/idn-homographs-database),
+licensed under the MIT License. The embedded data is pinned to commit `f27b783`
+(retrieved 2021-05-26).
 
 ## Installing
 
@@ -334,7 +376,7 @@ sqdist --version
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # unit tests in each module's #[cfg(test)] block; currently 76 tests
+cargo test               # unit tests in each module's #[cfg(test)] block; currently 88 tests
 ```
 
 The confusables table is embedded at compile time (`src/confusables_data.rs`,
@@ -342,11 +384,40 @@ auto-generated from `confusables.txt`), so **no runtime data files or network
 access** are needed for confusables. sqdist has one compiled dependency:
 `unicode-security` (MIT/Apache-2.0), used for the `script_restriction` axis.
 
+### Version and data provenance
+
+`-v`/`--version` prints the binary version, build commit, and one `data:` line
+per embedded confusable source (regardless of `--confusables`):
+
+```
+sqdist 0.3.0 (<sha>)
+  data: UTS#39 confusables.txt v17.0.0 (2025-07-22)
+  data: FlowCrypt idn-homographs-database @ f27b783 (retrieved 2021-05-26)
+```
+
 ## Regenerating the confusables table
 
-If a new Unicode version ships, regenerate the embedded table:
+If a new Unicode version ships, regenerate the embedded UTS#39 table:
 
 ```sh
 curl -sSL https://www.unicode.org/Public/security/latest/confusables.txt -o confusables.txt
 python3 scripts/gen_confusables.py   # emits src/confusables_data.rs
+```
+
+### Regenerating the FlowCrypt table
+
+The FlowCrypt single-char supplement is regenerated from the upstream
+`idn-homographs-database` JSON. The 19 MB source file is not committed; fetch it
+when you need to update:
+
+```sh
+# Online (fetches source JSON from GitHub)
+python3 scripts/gen_flowcrypt.py   # emits src/flowcrypt_data.rs
+
+# Offline / pinned (provide local copies + provenance metadata)
+python3 scripts/gen_flowcrypt.py \
+  --homographs path/to/homographs.json \
+  --confusables path/to/confusables.txt \
+  --source-commit <sha> \
+  --source-date <YYYY-MM-DD>
 ```
