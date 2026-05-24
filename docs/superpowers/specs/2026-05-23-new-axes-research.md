@@ -148,8 +148,13 @@ the current data files. So a digraph axis fills a hole the standard itself flags
 — but the standard provides **no data** for it.
 
 The best citable data precedent remains **dnstwist's `glyphs_ascii`**
-(Apache-2.0): a ~48-entry table containing exactly `'rn':('m',)`, `'cl':('d',)`,
-`'vv':('w',)`, `'m':('n','nn','rn')`, etc. Directly reusable with attribution.
+(Apache-2.0). Verified against the actual source: it is a **24-key** dict
+(mostly single-char ASCII homoglyphs that duplicate UTS#39), of which only a
+handful involve digraphs — `'rn':('m',)`, `'cl':('d',)`, `'w':('vv',)`,
+`'m':('n','nn','rn')`, `'d':('b','cl','dl')`. It carries **no false-positive
+data** and is built for candidate *generation* (a cheap error model), so it is a
+*seed* for which pairs are plausible, not a drop-in table. (See the "Unified
+supplemental confusables" section: we take exactly 4 curated digraphs from it.)
 Other homoglyph libs (confusable_homoglyphs, life4/homoglyphs, codebox/homoglyph,
 **FlowCrypt idn-homographs-database** [MIT, ~13K pairs], **ShamFinder SimChar**
 [no license — unusable]) are all **single-char only** and add NO digraph pairs —
@@ -246,9 +251,28 @@ the non-canonical char to the SAME skeleton UTS#39 already assigns its partner
 (e.g. FlowCrypt `X ~ o` + UTS#39 `o → o` ⇒ add `X → o`). For clusters with no
 UTS#39 anchor, pick the lowest code point as canonical. **UTS#39 always wins on
 conflict** (it is the authoritative, default-on source); the generator detects
-and logs disagreements. Digraphs (`rn → m`) are added as multi-char *source*
-keys — which requires the skeleton pass to match multi-char sequences
-(longest-match-first), the one genuinely new skeletonization mechanic.
+and logs disagreements. Digraphs are added as multi-char *source* keys — which
+requires the skeleton pass to match multi-char sequences (longest-match-first),
+the one genuinely new skeletonization mechanic.
+
+**Digraph set is deliberately tiny and one-way (decided):** exactly **4**
+hand-curated digraph→single-char mappings, all one-directional (the spoof is
+always "digraph impersonating a single char"):
+
+| Digraph | → | Note |
+|---|---|---|
+| `vv` | `w` | |
+| `cl` | `d` | highest FP risk (`clear`, `clock`) |
+| `rn` | `m` | already in UTS#39 as `m`'s skeleton; harmless to also have the digraph source |
+| `nn` | `m` | |
+
+This is **NOT a wholesale import of dnstwist's `glyphs_ascii`.** Inspection of
+the actual dict (24 keys, only ~8 distinct digraph strings, asymmetric
+directions, no FP data, and built for *candidate generation* — a far cheaper
+error model than scoring) showed it is only useful as a *seed* confirming these
+pairs are plausible. We take exactly the 4 above and ignore the rest
+(`dl`, `lb`, `lh`, `lc`, `b↔lb`, etc. — noisier, unmotivated by a real use case).
+Matching is one-way (`vv`→`w`, not `w`→`vv`).
 
 ### CLI: `--confusables=<list>` source selector (chosen over a per-source flag)
 
@@ -258,7 +282,9 @@ high-FP `cl↔d` out of the default path):
 
 - `uts39` — the standard data (always implicitly on).
 - `flowcrypt` — single-char supplement (MIT; filtered subset — see below).
-- `digraph` — dnstwist `glyphs_ascii` multi-char pairs (Apache-2.0).
+- `digraph` — the 4 hand-curated digraph→single-char mappings above (seeded by
+  dnstwist `glyphs_ascii`, Apache-2.0; its pairs informed the selection but the
+  table is our own short curated list).
 
 Parsed/validated like `--fields`/`--metric` (error on unknown source, listing
 valid names). Chosen over a standalone `--flowcrypt` flag because the sources are
@@ -268,16 +294,17 @@ risk means users want to enable `flowcrypt` *without* `digraph`.
 
 ### Concrete change set
 
-1. **Generators / data (the real work):**
-   - Vendor FlowCrypt `homographs.json` (MIT — add a NOTICE attribution entry)
-     and dnstwist `glyphs_ascii` (Apache-2.0 — attribution).
-   - **Filter FlowCrypt down** from ~13K pairs / 18.4 MB to the typosquat-relevant
-     subset (drop the CJK/Hangul bulk, ~8.8K entries; keep Latin-confusable
-     chars). Judgment step in the generator.
-   - **Anchor-to-UTS#39 canonicalization** + conflict logging (UTS#39 wins).
-   - Emit *separate* tables (e.g. `flowcrypt_data.rs`, `digraph_data.rs`) in the
-     same `&[(u32,&str)]` / `&[(&str,&str)]` shape, so sources stay
-     distinguishable and individually selectable.
+1. **Generators / data:**
+   - **digraph** — no generator needed; it's a hand-written 4-entry table
+     (`&[(&str,&str)]`: `[("vv","w"),("cl","d"),("rn","m"),("nn","m")]`) in its
+     own module (`digraph_data.rs`). dnstwist (Apache-2.0) is credited in a
+     comment as the seed source, but the file is authored by us.
+   - **flowcrypt** — vendor `homographs.json` (MIT — NOTICE attribution),
+     **filter down** from ~13K pairs / 18.4 MB to the typosquat-relevant subset
+     (drop the CJK/Hangul bulk, ~8.8K entries; keep Latin-confusable chars), apply
+     **anchor-to-UTS#39 canonicalization** + conflict logging (UTS#39 wins), and
+     emit `flowcrypt_data.rs` (`&[(u32,&str)]`, same shape as `CONFUSABLES`).
+   - Separate tables per source so each is individually selectable.
 
 2. **Runtime — make the skeleton map source-parameterized (the one real
    refactor):** today `skeleton_of` reads the global `CONFUSABLES`. With a source
@@ -291,9 +318,16 @@ risk means users want to enable `flowcrypt` *without* `digraph`.
 3. **CLI:** add `--confusables=<list>` parsing/validation; build the active map
    from the selection; pass it into the panel/context.
 
-4. **FP guards for `digraph`** (from the research): same-script gating (only
-   single-script Latin), short-name/font-context gate, per-pair deny list so
-   `cl↔d` can be disabled, only flag at tiny surrounding edit distance.
+4. **FP guards for `digraph` — DOCUMENTED, NOT IMPLEMENTED (decided).** Matching
+   is a **plain greedy longest-match-first rewrite** of the 4 digraphs wherever
+   they occur — same mechanism as any skeleton entry, no special gating. The
+   `--confusables=...,digraph` opt-in is itself the consent that the user accepts
+   the false-positive tradeoff (e.g. `cl→d` collapsing `clear`→`dear`). The
+   research-derived guards (same-script-Latin gating, short-name/font-context
+   gate, per-pair deny list, tiny-edit-distance gating) are recorded **as code
+   comments / future options** on the digraph table and matcher, NOT built now —
+   so a future maintainer who sees FP complaints knows the menu of mitigations
+   without us pre-building speculative logic.
 
 5. **Docs/tests:** document `--confusables` + sources + the "less authoritative"
    caveat; tests that a FlowCrypt-only / digraph-only pair is benign by default
