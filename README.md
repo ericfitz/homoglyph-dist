@@ -348,7 +348,7 @@ sqdist -j --confusables uts39,digraph devflovv devflow
 ### FlowCrypt attribution
 
 The `flowcrypt` source is derived from the
-[FlowCrypt idn-homographs-database](https://github.com/FlowCrypt/flowcrypt-security/tree/main/idn-homographs-database),
+[FlowCrypt idn-homographs-database](https://github.com/FlowCrypt/idn-homographs-database),
 licensed under the MIT License. The embedded data is pinned to commit `f27b783`
 (retrieved 2021-05-26).
 
