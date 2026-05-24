@@ -3,6 +3,7 @@
 //! Computes Levenshtein, Damerau-Levenshtein, and a homoglyph-aware
 //! (UTS#39 confusable-skeleton) weighted distance between two strings.
 
+mod axes;
 mod confusables_data;
 mod distance;
 
