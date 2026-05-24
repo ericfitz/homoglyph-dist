@@ -6,6 +6,7 @@
 //! the once-per-pair precomputation (char vecs, skeletons, alignment).
 
 use crate::distance::{self, AlignOp};
+use unicode_security::{RestrictionLevel, RestrictionLevelDetection};
 
 /// The value an axis produces. The output formatter renders each variant.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -126,6 +127,19 @@ pub trait Axis: Sync {
     /// Compute the value. `base` is the already-computed base map; it is empty
     /// during the base phase and fully populated for derived axes.
     fn compute(&self, ctx: &PairContext, base: &Panel) -> AxisValue;
+}
+
+/// Map a UTS#39 restriction level to its 0–5 ordinal (lower = more restrictive
+/// = safer). Explicit match so the mapping is stable if the enum is reordered.
+fn level_ordinal(level: RestrictionLevel) -> u64 {
+    match level {
+        RestrictionLevel::ASCIIOnly => 0,
+        RestrictionLevel::SingleScript => 1,
+        RestrictionLevel::HighlyRestrictive => 2,
+        RestrictionLevel::ModeratelyRestrictive => 3,
+        RestrictionLevel::MinimallyRestrictive => 4,
+        RestrictionLevel::Unrestricted => 5,
+    }
 }
 
 // ---- Base axes ----
@@ -280,6 +294,27 @@ impl Axis for ConfusableOnly {
     }
 }
 
+struct ScriptRestriction;
+impl Axis for ScriptRestriction {
+    fn key(&self) -> &'static str {
+        "script_restriction"
+    }
+    fn direction(&self) -> Direction {
+        Direction::HigherMoreDifferent
+    }
+    fn phase(&self) -> Phase {
+        Phase::Base
+    }
+    fn compute(&self, ctx: &PairContext, _base: &Panel) -> AxisValue {
+        // UTS#39 restriction level of the pair: the more-suspicious (max) of the
+        // two strings' levels. Latin+Cyrillic etc. has no consistent resolved
+        // script and scores high — the direct mixed-script spoof signal.
+        let la = level_ordinal(ctx.a.detect_restriction_level());
+        let lb = level_ordinal(ctx.b.detect_restriction_level());
+        AxisValue::Int(la.max(lb))
+    }
+}
+
 /// The full list of axis keys in canonical order.
 pub fn all_keys() -> Vec<&'static str> {
     ALL_AXES.iter().map(|ax| ax.key()).collect()
@@ -357,6 +392,7 @@ pub static ALL_AXES: &[&dyn Axis] = &[
     &Uts39ConfusableCount,
     &Uts39SkeletonDelta,
     &ConfusableOnly,
+    &ScriptRestriction,
 ];
 
 /// Run the panel: phase 1 computes every base axis into the map (registry
@@ -409,6 +445,7 @@ mod tests {
                 "uts39_confusable_count",
                 "uts39_skeleton_delta",
                 "confusable_only",
+                "script_restriction",
             ]
         );
     }
@@ -418,8 +455,8 @@ mod tests {
         let p = run("abc", "abd");
         let keys: Vec<&str> = p.entries.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys.first(), Some(&"equal"));
-        assert_eq!(keys.last(), Some(&"confusable_only"));
-        assert_eq!(keys.len(), 8);
+        assert_eq!(keys.last(), Some(&"script_restriction"));
+        assert_eq!(keys.len(), 9);
     }
 
     #[test]
@@ -598,5 +635,79 @@ mod tests {
         assert_eq!(metric_value(&p, "skeleton_damerau"), Some(0.0));
         // bool axis -> None (not a metric).
         assert_eq!(metric_value(&p, "equal"), None);
+    }
+
+    #[test]
+    fn level_ordinal_maps_all_variants() {
+        assert_eq!(level_ordinal(RestrictionLevel::ASCIIOnly), 0);
+        assert_eq!(level_ordinal(RestrictionLevel::SingleScript), 1);
+        assert_eq!(level_ordinal(RestrictionLevel::HighlyRestrictive), 2);
+        assert_eq!(level_ordinal(RestrictionLevel::ModeratelyRestrictive), 3);
+        assert_eq!(level_ordinal(RestrictionLevel::MinimallyRestrictive), 4);
+        assert_eq!(level_ordinal(RestrictionLevel::Unrestricted), 5);
+    }
+
+    #[test]
+    fn script_restriction_ascii_is_zero() {
+        assert_eq!(
+            run("paypal", "google").get("script_restriction"),
+            Some(AxisValue::Int(0))
+        );
+    }
+
+    #[test]
+    fn script_restriction_homoglyph_scores_high() {
+        let p = run("paypal", "p\u{0430}ypal");
+        match p.get("script_restriction") {
+            Some(AxisValue::Int(n)) => assert!(n >= 4, "expected >= 4, got {n}"),
+            other => panic!("expected Int, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_restriction_single_script_non_latin() {
+        let p = run("\u{03b1}\u{03b2}\u{03b3}", "\u{03b1}\u{03b2}\u{03b4}");
+        assert_eq!(p.get("script_restriction"), Some(AxisValue::Int(1)));
+    }
+
+    #[test]
+    fn script_restriction_takes_max_of_pair() {
+        let mixed = "p\u{0430}ypal";
+        let p = run("abc", mixed);
+        match p.get("script_restriction") {
+            Some(AxisValue::Int(n)) => assert!(
+                n >= 4,
+                "max should surface the mixed string's level, got {n}"
+            ),
+            other => panic!("expected Int, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn script_restriction_legit_japanese_not_inflated() {
+        // 日本の (Han+Hiragana, no Latin) resolves to {Jpan} -> SingleScript (1),
+        // NOT inflated to a mixed-script level. (Latin+Japanese would be
+        // HighlyRestrictive=2.)
+        let jp = "\u{65e5}\u{672c}\u{306e}";
+        let p = run(jp, jp);
+        assert_eq!(p.get("script_restriction"), Some(AxisValue::Int(1)));
+    }
+
+    #[test]
+    fn script_restriction_is_last_and_registry_has_nine() {
+        let keys: Vec<&str> = ALL_AXES.iter().map(|ax| ax.key()).collect();
+        assert_eq!(keys.len(), 9);
+        assert_eq!(keys.last(), Some(&"script_restriction"));
+    }
+
+    #[test]
+    fn script_restriction_direction_and_numeric() {
+        let ax = ALL_AXES
+            .iter()
+            .find(|ax| ax.key() == "script_restriction")
+            .unwrap();
+        assert_eq!(ax.direction(), Direction::HigherMoreDifferent);
+        assert!(validate_metric("script_restriction").is_ok());
+        assert!(numeric_keys().contains(&"script_restriction"));
     }
 }
