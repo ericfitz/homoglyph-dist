@@ -4,84 +4,24 @@
 //! (UTS#39 confusable-skeleton) weighted distance between two strings.
 
 mod confusables_data;
+mod distance;
 
-use confusables_data::CONFUSABLES;
 use std::env;
 use std::process::ExitCode;
-
-/// Look up the confusable skeleton for a single char.
-fn skeleton_of(c: char) -> Option<&'static str> {
-    let cp = c as u32;
-    CONFUSABLES
-        .binary_search_by(|&(k, _)| k.cmp(&cp))
-        .ok()
-        .map(|i| CONFUSABLES[i].1)
-}
-
-/// Are two chars confusable under UTS#39 skeleton equality?
-fn confusable(a: char, b: char) -> bool {
-    if a == b {
-        return true;
-    }
-    let mut sa_buf = [0u8; 4];
-    let mut sb_buf = [0u8; 4];
-    let sa = skeleton_of(a).unwrap_or_else(|| a.encode_utf8(&mut sa_buf));
-    let sb = skeleton_of(b).unwrap_or_else(|| b.encode_utf8(&mut sb_buf));
-    sa == sb
-}
-
-/// UTS#39 skeleton of a string: map each code point through the confusables
-/// table (or pass it through unchanged), concatenating the results. Single,
-/// non-recursive pass — the table targets are already in canonical form.
-fn skeleton(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut buf = [0u8; 4];
-    for c in s.chars() {
-        match skeleton_of(c) {
-            Some(sk) => out.push_str(sk),
-            None => out.push_str(c.encode_utf8(&mut buf)),
-        }
-    }
-    out
-}
 
 /// Substitution cost under the chosen model.
 fn sub_cost(a: char, b: char, homoglyph: bool, hogl_weight: f64) -> f64 {
     if a == b {
         0.0
-    } else if homoglyph && confusable(a, b) {
+    } else if homoglyph && distance::confusable(a, b) {
         hogl_weight
     } else {
         1.0
     }
 }
 
-/// Plain / weighted Levenshtein (no transposition).
-fn levenshtein(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
-    let (n, m) = (a.len(), b.len());
-    if n == 0 {
-        return m as f64;
-    }
-    if m == 0 {
-        return n as f64;
-    }
-    let mut prev: Vec<f64> = (0..=m).map(|x| x as f64).collect();
-    let mut cur = vec![0.0f64; m + 1];
-    for i in 1..=n {
-        cur[0] = i as f64;
-        for j in 1..=m {
-            let s = prev[j - 1] + sub_cost(a[i - 1], b[j - 1], homoglyph, w);
-            let del = prev[j] + 1.0;
-            let ins = cur[j - 1] + 1.0;
-            cur[j] = s.min(del).min(ins);
-        }
-        std::mem::swap(&mut prev, &mut cur);
-    }
-    prev[m]
-}
-
 /// Weighted Damerau-Levenshtein with adjacent transpositions (OSA variant).
-fn damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
+fn w_damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
     let (n, m) = (a.len(), b.len());
     if n == 0 {
         return m as f64;
@@ -298,23 +238,23 @@ struct Scores {
 fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
     let ca: Vec<char> = a.chars().collect();
     let cb: Vec<char> = b.chars().collect();
-    let lev = levenshtein(&ca, &cb, false, 0.0);
-    let dam = damerau(&ca, &cb, false, 0.0);
-    let hogl = damerau(&ca, &cb, true, hogl_weight);
+    let lev = distance::levenshtein(&ca, &cb);
+    let dam = distance::damerau(&ca, &cb);
+    let hogl = w_damerau(&ca, &cb, true, hogl_weight);
 
-    let ska = skeleton(a);
-    let skb = skeleton(b);
+    let ska = distance::skeleton(a);
+    let skb = distance::skeleton(b);
     let sva: Vec<char> = ska.chars().collect();
     let svb: Vec<char> = skb.chars().collect();
-    let skel = damerau(&sva, &svb, false, 0.0);
+    let skel = distance::damerau(&sva, &svb) as f64;
 
     let maxlen = ca.len().max(cb.len()).max(1) as f64;
     let skel_maxlen = sva.len().max(svb.len()).max(1) as f64;
     let confusable_only = a != b && ska == skb;
 
     Scores {
-        lev: lev as u64,
-        dam: dam as u64,
+        lev,
+        dam,
         hogl,
         skel,
         norm: hogl / maxlen,
@@ -747,26 +687,11 @@ mod tests {
     }
 
     #[test]
-    fn classic_levenshtein() {
-        assert_eq!(levenshtein(&cv("kitten"), &cv("sitting"), false, 0.0), 3.0);
-        assert_eq!(levenshtein(&cv("flaw"), &cv("lawn"), false, 0.0), 2.0);
-        assert_eq!(levenshtein(&cv(""), &cv("abc"), false, 0.0), 3.0);
-        assert_eq!(levenshtein(&cv("abc"), &cv("abc"), false, 0.0), 0.0);
-    }
-
-    #[test]
-    fn transposition_is_one_edit() {
-        assert_eq!(levenshtein(&cv("googel"), &cv("google"), false, 0.0), 2.0);
-        assert_eq!(damerau(&cv("googel"), &cv("google"), false, 0.0), 1.0);
-        assert_eq!(damerau(&cv("ca"), &cv("ac"), false, 0.0), 1.0);
-    }
-
-    #[test]
     fn homoglyph_cheaper_than_sub() {
         let spoof = "p\u{0430}ypal";
         let real = "paypal";
-        assert_eq!(damerau(&cv(spoof), &cv(real), false, 0.0), 1.0);
-        let h = damerau(&cv(spoof), &cv(real), true, 0.1);
+        assert_eq!(w_damerau(&cv(spoof), &cv(real), false, 0.0), 1.0);
+        let h = w_damerau(&cv(spoof), &cv(real), true, 0.1);
         assert!((h - 0.1).abs() < 1e-9, "got {h}");
     }
 
@@ -774,7 +699,7 @@ mod tests {
     fn full_homoglyph_word_near_zero() {
         let spoof = "g\u{043E}\u{043E}gle";
         let real = "google";
-        let h = damerau(&cv(spoof), &cv(real), true, 0.1);
+        let h = w_damerau(&cv(spoof), &cv(real), true, 0.1);
         assert!(
             (h - 0.2).abs() < 1e-9,
             "two homoglyphs should be 0.2, got {h}"
@@ -782,66 +707,8 @@ mod tests {
     }
 
     #[test]
-    fn digit_letter_confusable() {
-        // '1' skeletons to 'l'; '0' skeletons to UPPERCASE 'O' (case-sensitive,
-        // per UTS#39), so 0~O but not 0~o.
-        assert!(confusable('1', 'l'));
-        assert!(confusable('0', 'O'));
-        assert!(!confusable('0', 'o'));
-        assert!(confusable('I', 'l')); // capital I ~ lowercase L
-        assert!(!confusable('x', 'y'));
-    }
-
-    #[test]
     fn identical_is_zero_everywhere() {
-        assert_eq!(damerau(&cv("abc"), &cv("abc"), true, 0.1), 0.0);
-    }
-
-    #[test]
-    fn skeleton_maps_multichar() {
-        // UTS#39: the skeleton of 'm' is "rn", so "microsoft" and "rnicrosoft"
-        // share a skeleton.
-        assert_eq!(skeleton("microsoft"), skeleton("rnicrosoft"));
-        assert_eq!(skeleton("microsoft"), "rnicrosoft");
-    }
-
-    #[test]
-    fn skeleton_is_idempotent() {
-        for s in [
-            "microsoft",
-            "paypal",
-            "vvallet",
-            "g\u{43E}\u{43E}gle",
-            "abc123",
-        ] {
-            assert_eq!(
-                skeleton(&skeleton(s)),
-                skeleton(s),
-                "not idempotent for {s}"
-            );
-        }
-    }
-
-    #[test]
-    fn skeleton_collapses_homoglyphs() {
-        // Cyrillic а -> same skeleton as Latin paypal.
-        assert_eq!(skeleton("p\u{0430}ypal"), skeleton("paypal"));
-        // Unmapped chars pass through unchanged.
-        assert_eq!(skeleton("xyz"), "xyz");
-        // Empty string.
-        assert_eq!(skeleton(""), "");
-    }
-
-    #[test]
-    fn vv_w_and_cl_d_are_not_uts39_confusables() {
-        // UTS#39 does NOT define vv->w / cl->d (their RHS are not source code
-        // points). These pin the documented gap; update deliberately if a
-        // supplemental confusable table is ever added.
-        assert_ne!(skeleton("vv"), skeleton("w"));
-        assert!(!score_pair("devflovv", "devflow", 0.1).confusable_only);
-        assert_ne!(skeleton("cl"), skeleton("d"));
-        // m->rn IS defined, for contrast.
-        assert_eq!(skeleton("m"), "rn");
+        assert_eq!(w_damerau(&cv("abc"), &cv("abc"), true, 0.1), 0.0);
     }
 
     #[test]
