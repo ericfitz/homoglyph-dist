@@ -1,3 +1,4 @@
 /target
 /dist
 confusables.txt
+.claude/scheduled_tasks.lock
