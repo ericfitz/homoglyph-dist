@@ -1,388 +1,139 @@
 //! sqdist — string distance for typosquatting / homoglyph detection.
 //!
-//! Computes Levenshtein, Damerau-Levenshtein, and a homoglyph-aware
-//! (UTS#39 confusable-skeleton) weighted distance between two strings.
+//! Computes a panel of independent similarity axes (Levenshtein, Damerau,
+//! their UTS#39-skeleton variants, and confusable-involvement signals) between
+//! two strings. See src/axes.rs for the axis registry and src/verdict.rs for
+//! the single-pair human verdict.
 
 mod axes;
 mod confusables_data;
 mod distance;
 mod verdict;
 
+use axes::{
+    build_panel, metric_value, parse_fields, validate_metric, PairContext, Panel, ALL_AXES,
+};
 use std::env;
 use std::process::ExitCode;
+use verdict::verdict;
 
-/// Substitution cost under the chosen model.
-fn sub_cost(a: char, b: char, homoglyph: bool, hogl_weight: f64) -> f64 {
-    if a == b {
-        0.0
-    } else if homoglyph && distance::confusable(a, b) {
-        hogl_weight
-    } else {
-        1.0
+/// A scored row carried through batch/list modes: the two strings + the panel.
+type Row = (String, String, Panel);
+
+/// Compute the panel for a pair.
+fn score_pair(a: &str, b: &str) -> Panel {
+    build_panel(&PairContext::new(a, b))
+}
+
+/// The selected axis keys to emit, in canonical order: all when None.
+fn selected_keys(fields: Option<&[&'static str]>) -> Vec<&'static str> {
+    match fields {
+        None => ALL_AXES.iter().map(|ax| ax.key()).collect(),
+        Some(list) => list.to_vec(),
     }
 }
 
-/// Weighted Damerau-Levenshtein with adjacent transpositions (OSA variant).
-fn w_damerau(a: &[char], b: &[char], homoglyph: bool, w: f64) -> f64 {
-    let (n, m) = (a.len(), b.len());
-    if n == 0 {
-        return m as f64;
-    }
-    if m == 0 {
-        return n as f64;
-    }
-    let cols = m + 1;
-    let mut d = vec![0.0f64; (n + 1) * cols];
-    let idx = |i: usize, j: usize| i * cols + j;
-    for i in 0..=n {
-        d[idx(i, 0)] = i as f64;
-    }
-    for j in 0..=m {
-        d[idx(0, j)] = j as f64;
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            let s = d[idx(i - 1, j - 1)] + sub_cost(a[i - 1], b[j - 1], homoglyph, w);
-            let del = d[idx(i - 1, j)] + 1.0;
-            let ins = d[idx(i, j - 1)] + 1.0;
-            let mut best = s.min(del).min(ins);
-            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                let trans = d[idx(i - 2, j - 2)] + 1.0;
-                if trans < best {
-                    best = trans;
-                }
-            }
-            d[idx(i, j)] = best;
-        }
-    }
-    d[idx(n, m)]
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Metric {
-    Homoglyph,
-    Skeleton,
-}
-
-/// The distance used for thresholding/sorting, per the chosen metric.
-fn metric_value(s: &Scores, m: Metric) -> f64 {
-    match m {
-        Metric::Homoglyph => s.hogl,
-        Metric::Skeleton => s.skel,
-    }
-}
-
-/// Sort results ascending by the active metric (most suspicious first) and
-/// optionally keep only the first `top`. Stable: ties preserve input order.
-fn sort_and_truncate(
-    mut results: Vec<(String, String, Scores)>,
-    metric: Metric,
-    top: Option<usize>,
-) -> Vec<(String, String, Scores)> {
-    results.sort_by(|x, y| {
-        metric_value(&x.2, metric)
-            .partial_cmp(&metric_value(&y.2, metric))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    if let Some(n) = top {
-        results.truncate(n);
-    }
-    results
-}
-
-/// Score `string` against one raw candidate line. Returns the scored row
-/// (with the trimmed candidate as `match`), or `None` if the line is blank or
-/// its `metric` distance exceeds `threshold`. Shared by the streaming and
-/// buffered (sort/top) list-mode paths so both apply identical trim/skip/filter
-/// rules.
-fn score_candidate(
-    string: &str,
-    raw: &str,
-    hogl_weight: f64,
-    metric: Metric,
-    threshold: Option<f64>,
-) -> Option<(String, String, Scores)> {
-    let line = raw.trim();
-    if line.is_empty() {
-        return None;
-    }
-    let s = score_pair(string, line, hogl_weight);
-    if let Some(t) = threshold {
-        if metric_value(&s, metric) > t {
-            return None;
-        }
-    }
-    Some((string.to_string(), line.to_string(), s))
-}
-
-/// Score `string` against each line, collecting the kept rows and sorting /
-/// truncating them. Used only when ranking is requested (`--sort`/`--top`);
-/// the unsorted path streams via `score_candidate` without buffering.
-fn process_list<I: Iterator<Item = String>>(
-    string: &str,
-    lines: I,
-    hogl_weight: f64,
-    metric: Metric,
-    threshold: Option<f64>,
-    sort: bool,
-    top: Option<usize>,
-) -> Vec<(String, String, Scores)> {
-    let mut results: Vec<(String, String, Scores)> = lines
-        .filter_map(|raw| score_candidate(string, &raw, hogl_weight, metric, threshold))
-        .collect();
-    if sort || top.is_some() {
-        results = sort_and_truncate(results, metric, top);
-    }
-    results
-}
-
-/// Batch-mode success rule: with a threshold, success requires at least one
-/// match; without a threshold, batch always succeeds.
-fn batch_matched_ok(threshold: Option<f64>, matched: bool) -> bool {
-    threshold.is_none() || matched
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Field {
-    Levenshtein,
-    Damerau,
-    HomoglyphDamerau,
-    SkeletonDamerau,
-    Normalized,
-    SkeletonNormalized,
-    ConfusableOnly,
-}
-
-impl Field {
-    /// Canonical emission order (matches the Scores struct / output contract).
-    const ALL: [Field; 7] = [
-        Field::Levenshtein,
-        Field::Damerau,
-        Field::HomoglyphDamerau,
-        Field::SkeletonDamerau,
-        Field::Normalized,
-        Field::SkeletonNormalized,
-        Field::ConfusableOnly,
-    ];
-
-    /// The JSON key / human-row label for this field.
-    fn name(self) -> &'static str {
-        match self {
-            Field::Levenshtein => "levenshtein",
-            Field::Damerau => "damerau",
-            Field::HomoglyphDamerau => "homoglyph_damerau",
-            Field::SkeletonDamerau => "skeleton_damerau",
-            Field::Normalized => "normalized",
-            Field::SkeletonNormalized => "skeleton_normalized",
-            Field::ConfusableOnly => "confusable_only",
-        }
-    }
-
-    fn from_name(s: &str) -> Option<Field> {
-        Field::ALL.into_iter().find(|f| f.name() == s)
-    }
-
-    /// This field's value formatted for JSON / human output.
-    fn value_string(self, s: &Scores) -> String {
-        match self {
-            Field::Levenshtein => s.lev.to_string(),
-            Field::Damerau => s.dam.to_string(),
-            Field::HomoglyphDamerau => s.hogl.to_string(),
-            Field::SkeletonDamerau => s.skel.to_string(),
-            Field::Normalized => format!("{:.4}", s.norm),
-            Field::SkeletonNormalized => format!("{:.4}", s.skel_norm),
-            Field::ConfusableOnly => s.confusable_only.to_string(),
-        }
-    }
-}
-
-/// Parse a comma-separated field list into canonical-ordered, de-duplicated
-/// Fields. Errors (naming the offender + valid names) on any unknown field.
-fn parse_fields(spec: &str) -> Result<Vec<Field>, String> {
-    let mut seen = [false; Field::ALL.len()];
-    for raw in spec.split(',') {
-        let name = raw.trim();
-        if name.is_empty() {
-            continue;
-        }
-        match Field::from_name(name) {
-            Some(f) => {
-                let idx = Field::ALL.iter().position(|&x| x == f).unwrap();
-                seen[idx] = true;
-            }
-            None => {
-                let valid: Vec<&str> = Field::ALL.iter().map(|f| f.name()).collect();
-                return Err(format!(
-                    "unknown field: {name} (valid: {})",
-                    valid.join(", ")
-                ));
-            }
-        }
-    }
-    Ok(Field::ALL
-        .into_iter()
-        .enumerate()
-        .filter(|(i, _)| seen[*i])
-        .map(|(_, f)| f)
-        .collect())
-}
-
-struct Scores {
-    lev: u64,
-    dam: u64,
-    hogl: f64,      // per-char weighted Damerau (single-char confusables)
-    skel: f64,      // Damerau on full skeletons (multi-char aware)
-    norm: f64,      // hogl / max(len)
-    skel_norm: f64, // skel / max(skeleton len)
-    confusable_only: bool,
-}
-
-fn score_pair(a: &str, b: &str, hogl_weight: f64) -> Scores {
-    let ca: Vec<char> = a.chars().collect();
-    let cb: Vec<char> = b.chars().collect();
-    let lev = distance::levenshtein(&ca, &cb);
-    let dam = distance::damerau(&ca, &cb);
-    let hogl = w_damerau(&ca, &cb, true, hogl_weight);
-
-    let ska = distance::skeleton(a);
-    let skb = distance::skeleton(b);
-    let sva: Vec<char> = ska.chars().collect();
-    let svb: Vec<char> = skb.chars().collect();
-    let skel = distance::damerau(&sva, &svb) as f64;
-
-    let maxlen = ca.len().max(cb.len()).max(1) as f64;
-    let skel_maxlen = sva.len().max(svb.len()).max(1) as f64;
-    let confusable_only = a != b && ska == skb;
-
-    Scores {
-        lev,
-        dam,
-        hogl,
-        skel,
-        norm: hogl / maxlen,
-        skel_norm: skel / skel_maxlen,
-        confusable_only,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Verdict {
-    Identical,
-    LikelySpoof,
-    LikelyBenign,
-}
-
-impl Verdict {
-    fn tag(self) -> &'static str {
-        match self {
-            Verdict::Identical => "IDENTICAL",
-            Verdict::LikelySpoof => "LIKELY SPOOF",
-            Verdict::LikelyBenign => "LIKELY BENIGN",
-        }
-    }
-}
-
-/// Classify a scored pair into a human verdict + explanation sentence.
-/// `len_a`/`len_b` are character counts; `len_tolerance` bounds the
-/// length-difference ratio allowed for a spoof verdict (default 0.25).
-fn verdict(s: &Scores, len_a: usize, len_b: usize, len_tolerance: f64) -> (Verdict, String) {
-    // dam == 0 means the strings are byte-identical.
-    if s.dam == 0 {
-        return (Verdict::Identical, "The strings are identical.".to_string());
-    }
-
-    let maxlen = len_a.max(len_b).max(1) as f64;
-    let len_diff_ratio = (len_a as f64 - len_b as f64).abs() / maxlen;
-    // Fraction of the edit distance explained by homoglyphs. Can be negative
-    // when skeletonization expands length (skel > dam); the > 0.5 test below
-    // handles that safely.
-    let homoglyph_share = if s.dam == 0 {
-        0.0
-    } else {
-        (s.dam as f64 - s.skel) / s.dam as f64
-    };
-
-    let is_spoof = s.confusable_only
-        || (homoglyph_share > 0.5 && len_a.max(len_b) >= 3 && len_diff_ratio <= len_tolerance);
-
-    // Pluralize the edit count once; reuse in every message.
-    let edits = if s.dam == 1 {
-        "1 edit".to_string()
-    } else {
-        format!("{} edits", s.dam)
-    };
-
-    if is_spoof {
-        let detail = if s.confusable_only {
-            "every differing character is a homoglyph (the strings are visually identical)"
-        } else {
-            "most of the difference comes from homoglyphs (visually confusable characters)"
-        };
-        let msg = format!(
-            "The strings differ by {edits}, but {detail}. High likelihood of an attempt to confuse."
-        );
-        return (Verdict::LikelySpoof, msg);
-    }
-
-    // Benign: typo (small distance) vs unrelated (large distance).
-    let msg = if s.dam <= 2 {
-        let homo_note = if s.skel < s.dam as f64 {
-            " (with only minor homoglyph involvement)"
-        } else {
-            ""
-        };
-        format!(
-            "The strings differ by {edits} with no significant homoglyph involvement{homo_note} — likely a typo."
-        )
-    } else {
-        format!(
-            "The strings differ by {edits} with no significant homoglyph involvement — they appear unrelated."
-        )
-    };
-    (Verdict::LikelyBenign, msg)
-}
-
-/// One JSONL record for a scored pair. `keys` names the two strings (e.g.
-/// ("a","b") or ("input","match")). `fields` = None emits all score fields;
-/// Some(list) emits only those (identifier keys are always included).
+/// One JSONL record for a scored pair. `keys` names the two strings.
 fn result_json(
     a: &str,
     b: &str,
-    s: &Scores,
+    panel: &Panel,
     keys: (&str, &str),
-    fields: Option<&[Field]>,
+    fields: Option<&[&'static str]>,
 ) -> String {
     let mut out = format!("{{\"{}\":{:?},\"{}\":{:?}", keys.0, a, keys.1, b);
-    for f in selected_fields(fields) {
-        out.push_str(&format!(",\"{}\":{}", f.name(), f.value_string(s)));
+    for k in selected_keys(fields) {
+        if let Some(v) = panel.get(k) {
+            out.push_str(&format!(",\"{}\":{}", k, v.to_json()));
+        }
     }
     out.push('}');
     out
 }
 
-/// The fields to emit, in canonical order: all when None, else the given slice
-/// (already canonical-ordered by parse_fields).
-fn selected_fields(fields: Option<&[Field]>) -> Vec<Field> {
-    match fields {
-        None => Field::ALL.to_vec(),
-        Some(list) => list.to_vec(),
-    }
-}
-
-fn emit(a: &str, b: &str, s: &Scores, json: bool, fields: Option<&[Field]>) {
-    if json {
-        println!("{}", result_json(a, b, s, ("a", "b"), fields));
-    } else {
-        // Pad labels to a fixed column so values align (longest label is
-        // "skeleton_normalized" = 19 chars; pad to 20 then a space).
-        for f in selected_fields(fields) {
-            println!("{:<20} {}", f.name(), f.value_string(s));
+/// Human single-pair output: one padded row per selected axis, then a blank
+/// line, then the verdict.
+fn emit_human(
+    a: &str,
+    b: &str,
+    panel: &Panel,
+    fields: Option<&[&'static str]>,
+    len_tolerance: f64,
+) {
+    for k in selected_keys(fields) {
+        if let Some(v) = panel.get(k) {
+            // Longest key is uts39_confusable_count (22); pad to 24.
+            println!("{k:<24} {}", v.to_human());
         }
     }
+    let la = a.chars().count();
+    let lb = b.chars().count();
+    let (cat, msg) = verdict(panel, la, lb, len_tolerance);
+    println!("\n[{}] {}", cat.tag(), msg);
+}
+
+/// The metric distance of a row, or +inf if the metric key is missing/non-numeric
+/// (cannot happen — the key is validated at parse time).
+fn row_metric(panel: &Panel, metric: &str) -> f64 {
+    metric_value(panel, metric).unwrap_or(f64::INFINITY)
+}
+
+/// Sort rows ascending by the active metric (most suspicious first) and
+/// optionally keep only the first `top`. Stable: ties preserve input order.
+fn sort_and_truncate(mut rows: Vec<Row>, metric: &str, top: Option<usize>) -> Vec<Row> {
+    rows.sort_by(|x, y| {
+        row_metric(&x.2, metric)
+            .partial_cmp(&row_metric(&y.2, metric))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if let Some(n) = top {
+        rows.truncate(n);
+    }
+    rows
+}
+
+/// Score `string` against one raw candidate line. Returns the scored row, or
+/// None if blank or over threshold on the active metric.
+fn score_candidate(string: &str, raw: &str, metric: &str, threshold: Option<f64>) -> Option<Row> {
+    let line = raw.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let panel = score_pair(string, line);
+    if let Some(t) = threshold {
+        if row_metric(&panel, metric) > t {
+            return None;
+        }
+    }
+    Some((string.to_string(), line.to_string(), panel))
+}
+
+/// Score `string` against each line, collecting kept rows, sorting/truncating
+/// when ranking is requested.
+fn process_list<I: Iterator<Item = String>>(
+    string: &str,
+    lines: I,
+    metric: &str,
+    threshold: Option<f64>,
+    sort: bool,
+    top: Option<usize>,
+) -> Vec<Row> {
+    let mut rows: Vec<Row> = lines
+        .filter_map(|raw| score_candidate(string, &raw, metric, threshold))
+        .collect();
+    if sort || top.is_some() {
+        rows = sort_and_truncate(rows, metric, top);
+    }
+    rows
+}
+
+/// Batch-mode success: with a threshold, requires at least one match; without,
+/// always succeeds.
+fn batch_matched_ok(threshold: Option<f64>, matched: bool) -> bool {
+    threshold.is_none() || matched
 }
 
 struct Opts {
-    hogl_weight: f64,
     json: bool,
     threshold: Option<f64>,
     stdin: bool,
@@ -390,9 +141,9 @@ struct Opts {
     list: Option<String>,
     sort: bool,
     top: Option<usize>,
-    metric: Metric,
+    metric: &'static str,
     positionals: Vec<String>,
-    fields: Option<Vec<Field>>,
+    fields: Option<Vec<&'static str>>,
     len_tolerance: f64,
 }
 
@@ -404,11 +155,10 @@ fn print_usage() {
          \x20   sqdist [OPTIONS] --stdin                    # batch: pre-paired lines\n\
          \x20   sqdist [OPTIONS] --string <S> --list <FILE> # score <S> vs each line\n\n\
          OPTIONS:\n\
-         \x20   -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)\n\
          \x20   -t, --threshold <F>     Alert when the --metric distance <= F. Single-pair:\n\
          \x20                           sets exit code. Batch: filters output; exit 1 if none match.\n\
-         \x20   -m, --metric <M>        Distance for -t and --sort: homoglyph|skeleton (default skeleton)\n\
-         \x20       --fields <LIST>     Comma-separated fields to show (default: all). See FIELD MEANINGS.\n\
+         \x20   -m, --metric <AXIS>     Numeric axis for -t and --sort (default skeleton_damerau)\n\
+         \x20       --fields <LIST>     Comma-separated axes to show (default: all). See AXES.\n\
          \x20       --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)\n\
          \x20   -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL\n\
          \x20       --string <S>        (with --list) the single string to compare\n\
@@ -418,16 +168,17 @@ fn print_usage() {
          \x20   -j, --json              Emit JSON (single-pair mode)\n\
          \x20   -v, --version           Print version and commit, then exit\n\
          \x20   -h, --help              This help\n\n\
-         FIELD MEANINGS:\n\
-         \x20   levenshtein           min single-char insert/delete/substitute edits\n\
-         \x20   damerau               like levenshtein, but an adjacent swap counts as one edit\n\
-         \x20   homoglyph_damerau     Damerau where a single-char confusable substitution costs\n\
-         \x20                         --hogl-weight (multi-char confusables are caught by skeleton_damerau)\n\
-         \x20   skeleton_damerau      Damerau after reducing both strings to UTS#39 skeletons\n\
-         \x20                         (~0 when visually identical, incl. multi-char confusables)\n\
-         \x20   normalized            homoglyph_damerau / max(len_a, len_b), a 0-1 score\n\
-         \x20   skeleton_normalized   skeleton_damerau / max(skeleton lengths), a 0-1 score\n\
-         \x20   confusable_only       true when the strings differ but share an identical skeleton\n\n\
+         AXES:\n\
+         \x20   equal                   the strings are byte-identical (bool)\n\
+         \x20   levenshtein             min single-char insert/delete/substitute edits\n\
+         \x20   damerau                 like levenshtein, but an adjacent swap counts as one edit\n\
+         \x20   skeleton_levenshtein    levenshtein after reducing both to UTS#39 skeletons\n\
+         \x20   skeleton_damerau        damerau after reducing both to UTS#39 skeletons\n\
+         \x20                           (~0 when visually identical, incl. multi-char confusables)\n\
+         \x20   uts39_confusable_count  # of aligned substitutions that are UTS#39-confusable (experimental)\n\
+         \x20   uts39_skeleton_delta    damerau - skeleton_damerau; edits that vanish under\n\
+         \x20                           skeletonization (experimental, may change)\n\
+         \x20   confusable_only         true when the strings differ but share an identical skeleton\n\n\
          OUTPUT KEYS: single-pair/stdin use a,b; list mode uses input,match. Batch is JSONL.\n"
     );
 }
@@ -435,7 +186,6 @@ fn print_usage() {
 fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
     let mut args = argv.into_iter();
     let mut opts = Opts {
-        hogl_weight: 0.1,
         json: false,
         threshold: None,
         stdin: false,
@@ -443,7 +193,7 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
         list: None,
         sort: false,
         top: None,
-        metric: Metric::Skeleton,
+        metric: "skeleton_damerau",
         positionals: Vec::new(),
         fields: None,
         len_tolerance: 0.25,
@@ -465,12 +215,8 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
             "-j" | "--json" => opts.json = true,
             "-s" | "--stdin" => opts.stdin = true,
             "--sort" => opts.sort = true,
-            "--string" => {
-                opts.string = Some(args.next().ok_or("--string needs a value")?);
-            }
-            "--list" => {
-                opts.list = Some(args.next().ok_or("--list needs a value")?);
-            }
+            "--string" => opts.string = Some(args.next().ok_or("--string needs a value")?),
+            "--list" => opts.list = Some(args.next().ok_or("--list needs a value")?),
             "--top" => {
                 let v = args.next().ok_or("--top needs a value")?;
                 let n: usize = v.parse().map_err(|_| "invalid --top")?;
@@ -482,19 +228,7 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
             }
             "-m" | "--metric" => {
                 let v = args.next().ok_or("--metric needs a value")?;
-                opts.metric = match v.as_str() {
-                    "homoglyph" => Metric::Homoglyph,
-                    "skeleton" => Metric::Skeleton,
-                    other => {
-                        return Err(format!(
-                            "invalid --metric: {other} (use homoglyph|skeleton)"
-                        ))
-                    }
-                };
-            }
-            "-w" | "--hogl-weight" => {
-                let v = args.next().ok_or("--hogl-weight needs a value")?;
-                opts.hogl_weight = v.parse().map_err(|_| "invalid --hogl-weight")?;
+                opts.metric = validate_metric(&v)?;
             }
             "--fields" => {
                 let v = args.next().ok_or("--fields needs a value")?;
@@ -519,7 +253,6 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
         }
     }
 
-    // Mode resolution: exactly one of {single-pair positionals, --stdin, --list}.
     let list_mode = opts.list.is_some() || opts.string.is_some();
     if list_mode {
         if opts.list.is_none() || opts.string.is_none() {
@@ -578,35 +311,32 @@ fn main() -> ExitCode {
         let mut out = io::BufWriter::new(stdout.lock());
         let mut matched = false;
         if opts.sort || opts.top.is_some() {
-            // Ranking requires all rows up front: buffer, sort/truncate, emit.
-            let results = process_list(
+            let rows = process_list(
                 string,
                 lines,
-                opts.hogl_weight,
                 opts.metric,
                 opts.threshold,
                 opts.sort,
                 opts.top,
             );
-            matched = !results.is_empty();
-            for (a, b, s) in &results {
+            matched = !rows.is_empty();
+            for (a, b, panel) in &rows {
                 let _ = writeln!(
                     out,
                     "{}",
-                    result_json(a, b, s, ("input", "match"), opts.fields.as_deref())
+                    result_json(a, b, panel, ("input", "match"), opts.fields.as_deref())
                 );
             }
         } else {
-            // No ranking: stream each kept row straight out, no buffering.
             for raw in lines {
-                if let Some((a, b, s)) =
-                    score_candidate(string, &raw, opts.hogl_weight, opts.metric, opts.threshold)
+                if let Some((a, b, panel)) =
+                    score_candidate(string, &raw, opts.metric, opts.threshold)
                 {
                     matched = true;
                     let _ = writeln!(
                         out,
                         "{}",
-                        result_json(&a, &b, &s, ("input", "match"), opts.fields.as_deref())
+                        result_json(&a, &b, &panel, ("input", "match"), opts.fields.as_deref())
                     );
                 }
             }
@@ -640,9 +370,9 @@ fn main() -> ExitCode {
                     continue;
                 }
             };
-            let s = score_pair(la, lb, opts.hogl_weight);
+            let panel = score_pair(la, lb);
             if let Some(t) = opts.threshold {
-                if metric_value(&s, opts.metric) > t {
+                if row_metric(&panel, opts.metric) > t {
                     continue;
                 }
             }
@@ -650,7 +380,7 @@ fn main() -> ExitCode {
             let _ = writeln!(
                 out,
                 "{}",
-                result_json(la, lb, &s, ("a", "b"), opts.fields.as_deref())
+                result_json(la, lb, &panel, ("a", "b"), opts.fields.as_deref())
             );
         }
         return if batch_matched_ok(opts.threshold, matched) {
@@ -663,16 +393,17 @@ fn main() -> ExitCode {
     // Single-pair mode.
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
-    let s = score_pair(a, b, opts.hogl_weight);
-    emit(a, b, &s, opts.json, opts.fields.as_deref());
-    if !opts.json {
-        let la = a.chars().count();
-        let lb = b.chars().count();
-        let (cat, msg) = verdict(&s, la, lb, opts.len_tolerance);
-        println!("\n[{}] {}", cat.tag(), msg);
+    let panel = score_pair(a, b);
+    if opts.json {
+        println!(
+            "{}",
+            result_json(a, b, &panel, ("a", "b"), opts.fields.as_deref())
+        );
+    } else {
+        emit_human(a, b, &panel, opts.fields.as_deref(), opts.len_tolerance);
     }
     if let Some(t) = opts.threshold {
-        return if metric_value(&s, opts.metric) <= t {
+        return if row_metric(&panel, opts.metric) <= t {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -684,166 +415,174 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn cv(s: &str) -> Vec<char> {
-        s.chars().collect()
-    }
+    use axes::AxisValue;
 
     #[test]
-    fn homoglyph_cheaper_than_sub() {
-        let spoof = "p\u{0430}ypal";
-        let real = "paypal";
-        assert_eq!(w_damerau(&cv(spoof), &cv(real), false, 0.0), 1.0);
-        let h = w_damerau(&cv(spoof), &cv(real), true, 0.1);
-        assert!((h - 0.1).abs() < 1e-9, "got {h}");
-    }
-
-    #[test]
-    fn full_homoglyph_word_near_zero() {
-        let spoof = "g\u{043E}\u{043E}gle";
-        let real = "google";
-        let h = w_damerau(&cv(spoof), &cv(real), true, 0.1);
-        assert!(
-            (h - 0.2).abs() < 1e-9,
-            "two homoglyphs should be 0.2, got {h}"
-        );
-    }
-
-    #[test]
-    fn identical_is_zero_everywhere() {
-        assert_eq!(w_damerau(&cv("abc"), &cv("abc"), true, 0.1), 0.0);
-    }
-
-    #[test]
-    fn skeleton_damerau_catches_multichar_spoof() {
-        let s = score_pair("rnicrosoft", "microsoft", 0.1);
-        // Per-char metric can't align "rn" to "m", so it costs real edits.
-        assert!(
-            s.hogl > 1.0,
-            "homoglyph_damerau should be > 1, got {}",
-            s.hogl
-        );
-        // Skeleton metric sees identical skeletons => zero.
-        assert!(
-            s.skel.abs() < 1e-9,
-            "skeleton_damerau should be ~0, got {}",
-            s.skel
-        );
-        assert!(s.confusable_only, "should be confusable_only");
-    }
-
-    #[test]
-    fn confusable_only_spans_unequal_lengths() {
-        // "rnicrosoft" (10) vs "microsoft" (9): different lengths, same skeleton.
-        let s = score_pair("rnicrosoft", "microsoft", 0.1);
-        assert!(s.confusable_only);
-        // Genuinely different strings are not confusable_only.
-        let t = score_pair("google", "gogle", 0.1);
-        assert!(!t.confusable_only);
-    }
-
-    #[test]
-    fn skeleton_normalized_guards_zero() {
-        // Two empty strings: a == b so confusable_only is false; norm fields 0.
-        let s = score_pair("", "", 0.1);
-        assert_eq!(s.skel_norm, 0.0);
-        assert!(!s.confusable_only);
-    }
-
-    #[test]
-    fn metric_value_selects_field() {
-        let s = score_pair("rnicrosoft", "microsoft", 0.1);
-        assert_eq!(metric_value(&s, Metric::Homoglyph), s.hogl);
-        assert_eq!(metric_value(&s, Metric::Skeleton), s.skel);
-    }
-
-    #[test]
-    fn sort_and_truncate_orders_and_caps() {
-        // Build results with known skeleton distances by pairing against "abc".
-        let pairs = vec![
-            (
-                "abc".to_string(),
-                "abXYZ".to_string(),
-                score_pair("abc", "abXYZ", 0.1),
-            ),
-            (
-                "abc".to_string(),
-                "abc".to_string(),
-                score_pair("abc", "abc", 0.1),
-            ),
-            (
-                "abc".to_string(),
-                "abd".to_string(),
-                score_pair("abc", "abd", 0.1),
-            ),
-        ];
-        let sorted = sort_and_truncate(pairs, Metric::Skeleton, None);
-        // Ascending by skeleton distance: identical (0) first.
-        assert_eq!(sorted[0].1, "abc");
-        assert!(
-            metric_value(&sorted[0].2, Metric::Skeleton)
-                <= metric_value(&sorted[1].2, Metric::Skeleton)
-        );
-        assert!(
-            metric_value(&sorted[1].2, Metric::Skeleton)
-                <= metric_value(&sorted[2].2, Metric::Skeleton)
-        );
-
-        // --top caps the output length.
-        let pairs2 = vec![
-            (
-                "abc".to_string(),
-                "abd".to_string(),
-                score_pair("abc", "abd", 0.1),
-            ),
-            (
-                "abc".to_string(),
-                "abc".to_string(),
-                score_pair("abc", "abc", 0.1),
-            ),
-        ];
-        let top1 = sort_and_truncate(pairs2, Metric::Skeleton, Some(1));
-        assert_eq!(top1.len(), 1);
-        assert_eq!(top1[0].1, "abc"); // closest kept
-    }
-
-    #[test]
-    fn result_json_uses_given_keys_and_all_fields() {
-        let s = score_pair("paypal", "p\u{0430}ypal", 0.1);
-        let line = result_json("paypal", "p\u{0430}ypal", &s, ("a", "b"), None);
+    fn result_json_uses_given_keys_and_all_axes() {
+        let panel = score_pair("paypal", "p\u{0430}ypal");
+        let line = result_json("paypal", "p\u{0430}ypal", &panel, ("a", "b"), None);
         assert!(line.starts_with("{\"a\":\"paypal\""));
-        assert!(line.contains("\"homoglyph_damerau\":"));
+        assert!(line.contains("\"damerau\":"));
         assert!(line.contains("\"skeleton_damerau\":"));
-        assert!(line.contains("\"normalized\":"));
-        assert!(line.contains("\"skeleton_normalized\":"));
+        assert!(line.contains("\"uts39_confusable_count\":"));
+        assert!(line.contains("\"uts39_skeleton_delta\":"));
         assert!(line.contains("\"confusable_only\":true"));
+        assert!(!line.contains("homoglyph_damerau"));
+        assert!(!line.contains("normalized"));
 
-        // File-mode keys.
-        let line2 = result_json("paypal", "p\u{0430}ypal", &s, ("input", "match"), None);
+        let line2 = result_json("paypal", "p\u{0430}ypal", &panel, ("input", "match"), None);
         assert!(line2.starts_with("{\"input\":\"paypal\",\"match\":"));
     }
 
     #[test]
+    fn result_json_respects_field_filter() {
+        let panel = score_pair("GOOGLE", "GO0GLE");
+        let only = parse_fields("damerau,confusable_only").unwrap();
+        let line = result_json("GOOGLE", "GO0GLE", &panel, ("a", "b"), Some(&only));
+        assert!(line.starts_with("{\"a\":\"GOOGLE\",\"b\":\"GO0GLE\""));
+        assert!(line.contains("\"damerau\":"));
+        assert!(line.contains("\"confusable_only\":"));
+        assert!(!line.contains("\"levenshtein\":"));
+        assert!(!line.contains("\"skeleton_damerau\":"));
+    }
+
+    #[test]
+    fn sort_and_truncate_orders_and_caps() {
+        let rows = vec![
+            (
+                "abc".to_string(),
+                "abXYZ".to_string(),
+                score_pair("abc", "abXYZ"),
+            ),
+            (
+                "abc".to_string(),
+                "abc".to_string(),
+                score_pair("abc", "abc"),
+            ),
+            (
+                "abc".to_string(),
+                "abd".to_string(),
+                score_pair("abc", "abd"),
+            ),
+        ];
+        let sorted = sort_and_truncate(rows, "skeleton_damerau", None);
+        assert_eq!(sorted[0].1, "abc"); // identical -> 0 first
+        assert!(
+            row_metric(&sorted[0].2, "skeleton_damerau")
+                <= row_metric(&sorted[1].2, "skeleton_damerau")
+        );
+        assert!(
+            row_metric(&sorted[1].2, "skeleton_damerau")
+                <= row_metric(&sorted[2].2, "skeleton_damerau")
+        );
+
+        let rows2 = vec![
+            (
+                "abc".to_string(),
+                "abd".to_string(),
+                score_pair("abc", "abd"),
+            ),
+            (
+                "abc".to_string(),
+                "abc".to_string(),
+                score_pair("abc", "abc"),
+            ),
+        ];
+        let top1 = sort_and_truncate(rows2, "skeleton_damerau", Some(1));
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].1, "abc");
+    }
+
+    #[test]
     fn sort_is_stable_on_ties() {
-        // Equal scores must preserve input order.
-        let pairs = vec![
+        let rows = vec![
             (
                 "x".to_string(),
                 "first".to_string(),
-                score_pair("x", "first", 0.1),
+                score_pair("x", "first"),
             ),
             (
                 "x".to_string(),
                 "secnd".to_string(),
-                score_pair("x", "secnd", 0.1),
+                score_pair("x", "secnd"),
             ),
         ];
-        // Both 5-char non-confusable => same skeleton distance.
-        let a = metric_value(&pairs[0].2, Metric::Skeleton);
-        let b = metric_value(&pairs[1].2, Metric::Skeleton);
+        let a = row_metric(&rows[0].2, "skeleton_damerau");
+        let b = row_metric(&rows[1].2, "skeleton_damerau");
         assert!((a - b).abs() < 1e-9, "precondition: scores must tie");
-        let sorted = sort_and_truncate(pairs, Metric::Skeleton, None);
+        let sorted = sort_and_truncate(rows, "skeleton_damerau", None);
         assert_eq!(sorted[0].1, "first");
         assert_eq!(sorted[1].1, "secnd");
+    }
+
+    #[test]
+    fn process_list_filters_sorts_caps() {
+        let lines = vec![
+            "paypal".to_string(),
+            "p\u{0430}ypal".to_string(),
+            "completely-different".to_string(),
+        ];
+        let out = process_list(
+            "paypal",
+            lines.clone().into_iter(),
+            "skeleton_damerau",
+            None,
+            true,
+            Some(2),
+        );
+        assert_eq!(out.len(), 2);
+        assert!(row_metric(&out[0].2, "skeleton_damerau").abs() < 1e-9);
+        assert!(row_metric(&out[1].2, "skeleton_damerau").abs() < 1e-9);
+
+        let out2 = process_list(
+            "paypal",
+            lines.into_iter(),
+            "skeleton_damerau",
+            Some(0.0),
+            false,
+            None,
+        );
+        assert_eq!(out2.len(), 2);
+
+        let out3 = process_list(
+            "paypal",
+            vec!["".to_string(), "  ".to_string(), "paypal".to_string()].into_iter(),
+            "skeleton_damerau",
+            None,
+            false,
+            None,
+        );
+        assert_eq!(out3.len(), 1);
+    }
+
+    #[test]
+    fn score_candidate_trims_skips_and_thresholds() {
+        assert!(score_candidate("paypal", "", "skeleton_damerau", None).is_none());
+        assert!(score_candidate("paypal", "   ", "skeleton_damerau", None).is_none());
+
+        let r = score_candidate("paypal", "  p\u{0430}ypal  ", "skeleton_damerau", None)
+            .expect("should score");
+        assert_eq!(r.0, "paypal");
+        assert_eq!(r.1, "p\u{0430}ypal");
+        assert_eq!(r.2.get("confusable_only"), Some(AxisValue::Bool(true)));
+
+        assert!(score_candidate("paypal", "zzzzzz", "skeleton_damerau", Some(0.0)).is_none());
+        assert!(
+            score_candidate("paypal", "p\u{0430}ypal", "skeleton_damerau", Some(0.0)).is_some()
+        );
+    }
+
+    #[test]
+    fn batch_exit_codes() {
+        assert!(batch_matched_ok(None, false));
+        assert!(batch_matched_ok(None, true));
+        assert!(batch_matched_ok(Some(0.5), true));
+        assert!(!batch_matched_ok(Some(0.5), false));
+    }
+
+    #[test]
+    fn git_sha_env_is_present() {
+        assert!(!env!("SQDIST_GIT_SHA").is_empty());
     }
 
     #[test]
@@ -854,12 +593,12 @@ mod tests {
             "--list".into(),
             "names.txt".into(),
             "--metric".into(),
-            "skeleton".into(),
+            "skeleton_damerau".into(),
         ])
         .unwrap();
         assert_eq!(o.string.as_deref(), Some("paypal"));
         assert_eq!(o.list.as_deref(), Some("names.txt"));
-        assert_eq!(o.metric, Metric::Skeleton);
+        assert_eq!(o.metric, "skeleton_damerau");
         assert!(o.positionals.is_empty());
     }
 
@@ -880,15 +619,10 @@ mod tests {
 
     #[test]
     fn parse_rejects_mode_conflicts() {
-        // positionals + --list
-        assert!(parse_from(vec!["a".into(), "b".into(), "--list".into(), "f".into(),]).is_err());
-        // --stdin + --list
-        assert!(parse_from(vec!["--stdin".into(), "--list".into(), "f".into(),]).is_err());
-        // --list without --string
+        assert!(parse_from(vec!["a".into(), "b".into(), "--list".into(), "f".into()]).is_err());
+        assert!(parse_from(vec!["--stdin".into(), "--list".into(), "f".into()]).is_err());
         assert!(parse_from(vec!["--list".into(), "f".into()]).is_err());
-        // --string without --list
         assert!(parse_from(vec!["--string".into(), "x".into()]).is_err());
-        // bad metric
         assert!(parse_from(vec![
             "--string".into(),
             "x".into(),
@@ -906,178 +640,37 @@ mod tests {
         assert_eq!(o.positionals.len(), 2);
         assert!(o.list.is_none());
         assert!(!o.stdin);
-        assert_eq!(o.metric, Metric::Skeleton); // default
+        assert_eq!(o.metric, "skeleton_damerau");
     }
 
     #[test]
-    fn process_list_filters_sorts_caps() {
-        let lines = vec![
-            "paypal".to_string(),        // identical -> skel 0
-            "p\u{0430}ypal".to_string(), // homoglyph -> skel 0, confusable_only
-            "completely-different".to_string(),
-        ];
-        // No threshold, sort by skeleton, top 2: the two zero-distance lines.
-        let out = process_list(
-            "paypal",
-            lines.clone().into_iter(),
-            0.1,
-            Metric::Skeleton,
-            None,
-            true,
-            Some(2),
-        );
-        assert_eq!(out.len(), 2);
-        assert!(metric_value(&out[0].2, Metric::Skeleton).abs() < 1e-9);
-        assert!(metric_value(&out[1].2, Metric::Skeleton).abs() < 1e-9);
-
-        // Threshold filters: only skeleton distance <= 0.0 kept (the 2 matches).
-        let out2: Vec<_> = process_list(
-            "paypal",
-            lines.into_iter(),
-            0.1,
-            Metric::Skeleton,
-            Some(0.0),
-            false,
-            None,
-        );
-        assert_eq!(out2.len(), 2);
-
-        // Blank lines are skipped.
-        let out3 = process_list(
-            "paypal",
-            vec!["".to_string(), "  ".to_string(), "paypal".to_string()].into_iter(),
-            0.1,
-            Metric::Skeleton,
-            None,
-            false,
-            None,
-        );
-        assert_eq!(out3.len(), 1);
+    fn metric_rejects_bool_axis_flag() {
+        assert!(parse_from(vec![
+            "--metric".into(),
+            "equal".into(),
+            "a".into(),
+            "b".into()
+        ])
+        .is_err());
+        assert!(parse_from(vec![
+            "--metric".into(),
+            "confusable_only".into(),
+            "a".into(),
+            "b".into()
+        ])
+        .is_err());
     }
 
     #[test]
-    fn score_candidate_trims_skips_and_thresholds() {
-        // Blank / whitespace-only -> None.
-        assert!(score_candidate("paypal", "", 0.1, Metric::Skeleton, None).is_none());
-        assert!(score_candidate("paypal", "   ", 0.1, Metric::Skeleton, None).is_none());
-
-        // A match is returned with the trimmed candidate; input is the string arg.
-        let r = score_candidate("paypal", "  p\u{0430}ypal  ", 0.1, Metric::Skeleton, None)
-            .expect("should score");
-        assert_eq!(r.0, "paypal");
-        assert_eq!(r.1, "p\u{0430}ypal"); // trimmed
-        assert!(r.2.confusable_only);
-
-        // Threshold against the chosen metric drops over-threshold rows.
-        // skeleton distance of an unrelated name > 0.0 => dropped.
-        assert!(score_candidate("paypal", "zzzzzz", 0.1, Metric::Skeleton, Some(0.0)).is_none());
-        // skeleton distance 0 (homoglyph) <= 0.0 => kept.
-        assert!(
-            score_candidate("paypal", "p\u{0430}ypal", 0.1, Metric::Skeleton, Some(0.0)).is_some()
-        );
-    }
-
-    #[test]
-    fn git_sha_env_is_present() {
-        // build.rs always sets this (real SHA or "unknown").
-        let sha = env!("SQDIST_GIT_SHA");
-        assert!(!sha.is_empty());
-    }
-
-    #[test]
-    fn parse_fields_valid_and_canonical_order() {
-        // User order is ignored; canonical order is enforced.
-        let f = parse_fields("confusable_only,damerau").unwrap();
-        assert_eq!(f, vec![Field::Damerau, Field::ConfusableOnly]);
-        // All names parse.
-        let all = parse_fields(
-            "levenshtein,damerau,homoglyph_damerau,skeleton_damerau,normalized,skeleton_normalized,confusable_only",
-        )
-        .unwrap();
-        assert_eq!(all.len(), 7);
-    }
-
-    #[test]
-    fn parse_fields_rejects_unknown() {
-        let e = parse_fields("damerau,bogus").unwrap_err();
-        assert!(e.contains("bogus"), "error should name the bad field: {e}");
-    }
-
-    #[test]
-    fn parse_fields_dedups() {
-        // Repeated names collapse to one, still canonical order.
-        let f = parse_fields("damerau,damerau,levenshtein").unwrap();
-        assert_eq!(f, vec![Field::Levenshtein, Field::Damerau]);
-    }
-
-    #[test]
-    fn result_json_respects_field_filter() {
-        let s = score_pair("GOOGLE", "GO0GLE", 0.1);
-        // Filtered: only the two requested fields, plus identifier keys.
-        let only = vec![Field::Damerau, Field::ConfusableOnly];
-        let line = result_json("GOOGLE", "GO0GLE", &s, ("a", "b"), Some(&only));
-        assert!(line.starts_with("{\"a\":\"GOOGLE\",\"b\":\"GO0GLE\""));
-        assert!(line.contains("\"damerau\":"));
-        assert!(line.contains("\"confusable_only\":"));
-        assert!(!line.contains("\"levenshtein\":"));
-        assert!(!line.contains("\"skeleton_damerau\":"));
-        // None = all fields (back-compat).
-        let full = result_json("GOOGLE", "GO0GLE", &s, ("a", "b"), None);
-        assert!(full.contains("\"levenshtein\":"));
-        assert!(full.contains("\"skeleton_normalized\":"));
-    }
-
-    #[test]
-    fn verdict_identical() {
-        let s = score_pair("abc", "abc", 0.1);
-        let (cat, msg) = verdict(&s, 3, 3, 0.25);
-        assert_eq!(cat, Verdict::Identical);
-        assert!(msg.to_lowercase().contains("identical"));
-    }
-
-    #[test]
-    fn verdict_single_char_spoof() {
-        // GO0GLE vs GOOGLE: one homoglyph substitution, confusable_only=true.
-        let s = score_pair("GOOGLE", "GO0GLE", 0.1);
-        let (cat, _msg) = verdict(&s, 6, 6, 0.25);
-        assert_eq!(cat, Verdict::LikelySpoof);
-    }
-
-    #[test]
-    fn verdict_multichar_spoof_unequal_length() {
-        // rnicrosoft (10) vs microsoft (9): confusable_only=true, lengths differ
-        // by 0.1 ratio — must still be a spoof.
-        let s = score_pair("rnicrosoft", "microsoft", 0.1);
-        let (cat, _msg) = verdict(&s, 10, 9, 0.25);
-        assert_eq!(cat, Verdict::LikelySpoof);
-    }
-
-    #[test]
-    fn verdict_benign_typo() {
-        // google vs gogle: 1 edit, NOT a homoglyph.
-        let s = score_pair("google", "gogle", 0.1);
-        let (cat, msg) = verdict(&s, 6, 5, 0.25);
-        assert_eq!(cat, Verdict::LikelyBenign);
-        assert!(msg.to_lowercase().contains("typo"));
-    }
-
-    #[test]
-    fn verdict_benign_unrelated() {
-        // Distant, no homoglyph involvement.
-        let s = score_pair("apple", "xylophone", 0.1);
-        let (cat, msg) = verdict(&s, 5, 9, 0.25);
-        assert_eq!(cat, Verdict::LikelyBenign);
-        assert!(msg.to_lowercase().contains("unrelated"));
-    }
-
-    #[test]
-    fn verdict_length_tolerance_boundary() {
-        // A high homoglyph_share but a big length difference must NOT be a spoof
-        // unless confusable_only. "a0" vs "aOxyz": '0'~'O' but xyz are real edits,
-        // so confusable_only is false; lengths 2 vs 5 (ratio 0.6 > 0.25).
-        let s = score_pair("a0", "aOxyz", 0.1);
-        let (cat, _msg) = verdict(&s, 2, 5, 0.25);
-        assert_eq!(cat, Verdict::LikelyBenign);
+    fn hogl_weight_flag_removed() {
+        assert!(parse_from(vec!["-w".into(), "0.1".into(), "a".into(), "b".into()]).is_err());
+        assert!(parse_from(vec![
+            "--hogl-weight".into(),
+            "0.1".into(),
+            "a".into(),
+            "b".into()
+        ])
+        .is_err());
     }
 
     #[test]
@@ -1091,7 +684,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             o.fields.as_deref(),
-            Some(&[Field::Damerau, Field::ConfusableOnly][..])
+            Some(&["damerau", "confusable_only"][..])
         );
     }
 
@@ -1126,39 +719,29 @@ mod tests {
             "--len-tolerance".into(),
             "5.0".into(),
             "a".into(),
-            "b".into(),
+            "b".into()
         ])
         .is_err());
         assert!(parse_from(vec![
             "--len-tolerance".into(),
             "-0.5".into(),
             "a".into(),
-            "b".into(),
+            "b".into()
         ])
         .is_err());
-        // boundary values 0.0 and 1.0 are allowed
         assert!(parse_from(vec![
             "--len-tolerance".into(),
             "0.0".into(),
             "a".into(),
-            "b".into(),
+            "b".into()
         ])
         .is_ok());
         assert!(parse_from(vec![
             "--len-tolerance".into(),
             "1.0".into(),
             "a".into(),
-            "b".into(),
+            "b".into()
         ])
         .is_ok());
-    }
-
-    #[test]
-    fn batch_exit_codes() {
-        // batch_matched_ok: no threshold => always ok; with threshold => ok iff matched.
-        assert!(batch_matched_ok(None, false));
-        assert!(batch_matched_ok(None, true));
-        assert!(batch_matched_ok(Some(0.5), true));
-        assert!(!batch_matched_ok(Some(0.5), false));
     }
 }

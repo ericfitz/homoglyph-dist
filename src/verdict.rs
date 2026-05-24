@@ -3,11 +3,6 @@
 //! equivalent to v0.2.0 (uts39_skeleton_delta replaces the old
 //! damerau-skeleton numerator; confusable_only is unchanged in meaning).
 
-// TEMPORARY: verdict.rs is not consumed by the binary target until Task 7
-// rewires main.rs. Until then its items are "dead" from the binary's view.
-// Removed in Task 7.
-#![allow(dead_code)]
-
 use crate::axes::{AxisValue, Panel};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

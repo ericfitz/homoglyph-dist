@@ -5,17 +5,13 @@
 //! human-row order, and `--fields`/`--metric` validation. `PairContext` holds
 //! the once-per-pair precomputation (char vecs, skeletons, alignment).
 
-// TEMPORARY: axes.rs is not consumed by the binary target until Task 7 wires
-// main.rs onto the panel. Until then its public items are "dead" from the
-// binary's view. Removed in Task 7.
-#![allow(dead_code)]
-
 use crate::distance::{self, AlignOp};
 
 /// The value an axis produces. The output formatter renders each variant.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AxisValue {
     Int(u64),
+    #[allow(dead_code)] // Float-valued axes arrive in Phase 3 (keyboard-distance)
     Float(f64),
     Bool(bool),
 }
@@ -49,6 +45,7 @@ impl AxisValue {
 /// How to read an axis value when reasoning generically (verdict/ranking).
 /// Not emitted in output.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // carried for future ranking; see design spec
 pub enum Direction {
     HigherMoreSimilar,
     HigherMoreDifferent,
@@ -84,7 +81,9 @@ pub struct PairContext<'a> {
     pub b: &'a str,
     pub ca: Vec<char>,
     pub cb: Vec<char>,
+    #[allow(dead_code)] // string-form skeletons; consumed by Phase 4 skeleton work
     pub ska: String,
+    #[allow(dead_code)] // string-form skeletons; consumed by Phase 4 skeleton work
     pub skb: String,
     pub sva: Vec<char>,
     pub svb: Vec<char>,
@@ -120,6 +119,7 @@ pub trait Axis: Sync {
     /// Stable JSON key / human label.
     fn key(&self) -> &'static str;
     /// How to interpret the value (verdict/ranking); not emitted.
+    #[allow(dead_code)] // carried for future ranking; see design spec
     fn direction(&self) -> Direction;
     /// Computation phase.
     fn phase(&self) -> Phase;

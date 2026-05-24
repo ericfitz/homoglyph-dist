@@ -108,7 +108,6 @@ pub fn damerau(a: &[char], b: &[char]) -> u64 {
 /// char slices). `Match` is a zero-cost diagonal step. `Ins`/`Del` are the
 /// single-char insert/delete; `Transpose` is an OSA adjacent swap.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // consumed by the uts39_confusable_count axis in Task 4
 pub enum AlignOp {
     Match,
     Sub(usize, usize),
@@ -122,7 +121,6 @@ pub enum AlignOp {
 /// cell we prefer the diagonal (match/substitution), then deletion, then
 /// insertion, then transposition — chosen so the substitution COUNT is stable.
 /// Used by the `uts39_confusable_count` axis to count confusable substitutions.
-#[allow(dead_code)] // consumed by the uts39_confusable_count axis in Task 4
 pub fn align(a: &[char], b: &[char]) -> Vec<AlignOp> {
     let (n, m) = (a.len(), b.len());
     let cols = m + 1;
