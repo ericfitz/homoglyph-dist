@@ -8,7 +8,7 @@ set -euo pipefail
 # --- Project ---
 BIN_NAME="sqdist"
 # Repo "owner/name" used for GitHub Releases and the Homebrew formula URL.
-GH_REPO="ericfitz/homoglyph-dist"
+GH_REPO="ericfitz/sqdist"
 
 # --- Code signing ---
 # Developer ID Application: signs the Mach-O binary.

@@ -363,7 +363,7 @@ cargo install sqdist
 ```
 
 You can also grab a signed `.pkg` installer or the universal tarball directly
-from the [latest release](https://github.com/ericfitz/homoglyph-dist/releases/latest).
+from the [latest release](https://github.com/ericfitz/sqdist/releases/latest).
 
 To check your installed version:
 
