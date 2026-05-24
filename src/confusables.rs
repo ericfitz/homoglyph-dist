@@ -54,15 +54,16 @@ impl ConfusableMap {
 
     /// Build from the enabled source set. UTS#39 is always the base; enabled
     /// supplements are merged in only for keys UTS#39 does not already define
-    /// (UTS#39 wins on collision). (flowcrypt/digraph wired in later tasks; for
-    /// now this builds the UTS#39-only map regardless of flags.)
-    pub fn from_sources(_sources: &Sources) -> Self {
+    /// (UTS#39 wins on collision).
+    pub fn from_sources(sources: &Sources) -> Self {
         let singles: Vec<(u32, &'static str)> = CONFUSABLES.to_vec();
         // CONFUSABLES is already sorted by key; keep it sorted.
-        ConfusableMap {
-            singles,
-            digraphs: &[],
-        }
+        let digraphs: &'static [(&'static str, &'static str)] = if sources.digraph {
+            crate::digraph_data::DIGRAPHS
+        } else {
+            &[]
+        };
+        ConfusableMap { singles, digraphs }
     }
 
     /// Skeleton of one char via the single-char map. None if unmapped.
@@ -210,5 +211,47 @@ mod tests {
         let e = parse_sources("uts39,bogus").unwrap_err();
         assert!(e.contains("bogus"), "names offender: {e}");
         assert!(e.contains("flowcrypt"), "lists valid: {e}");
+    }
+
+    #[test]
+    fn digraph_source_closes_gaps_when_enabled() {
+        let m = ConfusableMap::from_sources(&Sources {
+            flowcrypt: false,
+            digraph: true,
+        });
+        // vv->w, cl->d close; nn anchors to m's UTS#39 skeleton "rn" so nn unifies with m.
+        assert_eq!(m.skeleton("vv"), m.skeleton("w"));
+        assert_eq!(m.skeleton("devflovv"), m.skeleton("devflow"));
+        assert_eq!(m.skeleton("cl"), m.skeleton("d"));
+        assert_eq!(m.skeleton("nn"), m.skeleton("m")); // both -> "rn"
+                                                       // rn<->m is handled by UTS#39 (m->rn), not the digraph table:
+        assert_eq!(m.skeleton("rn"), m.skeleton("m"));
+        // Default (digraph off) still has the vv/w gap (regression pin).
+        let d = ConfusableMap::uts39();
+        assert_ne!(d.skeleton("vv"), d.skeleton("w"));
+    }
+
+    #[test]
+    fn digraph_does_not_break_uts39_rn_m() {
+        // rn<->m must STILL unify with digraph enabled (UTS#39 m->rn owns it;
+        // we deliberately omit a rn->m digraph that would invert it).
+        let m = ConfusableMap::from_sources(&Sources {
+            flowcrypt: false,
+            digraph: true,
+        });
+        assert_eq!(m.skeleton("rnicrosoft"), m.skeleton("microsoft"));
+    }
+
+    #[test]
+    fn digraph_longest_match_first() {
+        // A digraph match is taken before the per-char mapping at that position.
+        let m = ConfusableMap::from_sources(&Sources {
+            flowcrypt: false,
+            digraph: true,
+        });
+        // "cl" -> "d": the whole digraph collapses, not c then l.
+        assert_eq!(m.skeleton("cl"), "d");
+        // mid-word: "vvallet" -> "wallet"-skeleton.
+        assert_eq!(m.skeleton("vvallet"), m.skeleton("wallet"));
     }
 }

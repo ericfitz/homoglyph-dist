@@ -8,6 +8,7 @@
 mod axes;
 mod confusables;
 mod confusables_data;
+mod digraph_data;
 mod distance;
 mod keyboard;
 mod verdict;
