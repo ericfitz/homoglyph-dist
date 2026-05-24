@@ -1,6 +1,8 @@
 // Auto-generated from Unicode UTS#39 confusables.txt (v17.0.0, 2025-07-22).
 // Source code point -> confusable skeleton string. Sorted by code point.
 // 6565 entries.
+/// Provenance of the embedded UTS#39 confusables data, surfaced by `-v`.
+pub static CONFUSABLES_PROVENANCE: &str = "UTS#39 confusables.txt v17.0.0 (2025-07-22)";
 pub static CONFUSABLES: &[(u32, &str)] = &[
     (0x0022, "''"),
     (0x0025, "\u{ba}/\u{2080}"),

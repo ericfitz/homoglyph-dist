@@ -213,6 +213,7 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
                     env!("CARGO_PKG_VERSION"),
                     env!("SQDIST_GIT_SHA")
                 );
+                println!("  data: {}", confusables_data::CONFUSABLES_PROVENANCE);
                 std::process::exit(0);
             }
             "-j" | "--json" => opts.json = true,
@@ -754,5 +755,12 @@ mod tests {
             "b".into()
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn version_includes_confusables_provenance() {
+        let p = confusables_data::CONFUSABLES_PROVENANCE;
+        assert!(p.contains("UTS#39"), "provenance names the standard: {p}");
+        assert!(p.contains("17.0.0"), "provenance names the version: {p}");
     }
 }
