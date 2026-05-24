@@ -14,8 +14,6 @@ pub struct Sources {
 /// Parse a `--confusables` comma-list into `Sources`. `uts39` is always on
 /// (listing it is a no-op; omitting it does not disable it). Unknown source →
 /// Err naming the offender + valid names. Empty/whitespace → default (uts39).
-/// Wired into the CLI by Task 4 (`--confusables` flag in `parse_from`).
-#[allow(dead_code)]
 pub fn parse_sources(spec: &str) -> Result<Sources, String> {
     let mut s = Sources::default();
     for raw in spec.split(',') {
