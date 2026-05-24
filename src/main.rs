@@ -98,13 +98,18 @@ fn sort_and_truncate(mut rows: Vec<Row>, metric: &str, top: Option<usize>) -> Ve
 
 /// Score `string` against one raw candidate line. Returns the scored row, or
 /// None if blank or over threshold on the active metric.
-fn score_candidate(string: &str, raw: &str, metric: &str, threshold: Option<f64>) -> Option<Row> {
+fn score_candidate(
+    string: &str,
+    raw: &str,
+    metric: &str,
+    threshold: Option<f64>,
+    cmap: &confusables::ConfusableMap,
+) -> Option<Row> {
     let line = raw.trim();
     if line.is_empty() {
         return None;
     }
-    let cmap = confusables::ConfusableMap::uts39();
-    let panel = score_pair(string, line, &cmap);
+    let panel = score_pair(string, line, cmap);
     if let Some(t) = threshold {
         if row_metric(&panel, metric) > t {
             return None;
@@ -122,9 +127,10 @@ fn process_list<I: Iterator<Item = String>>(
     threshold: Option<f64>,
     sort: bool,
     top: Option<usize>,
+    cmap: &confusables::ConfusableMap,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = lines
-        .filter_map(|raw| score_candidate(string, &raw, metric, threshold))
+        .filter_map(|raw| score_candidate(string, &raw, metric, threshold, cmap))
         .collect();
     if sort || top.is_some() {
         rows = sort_and_truncate(rows, metric, top);
@@ -150,6 +156,7 @@ struct Opts {
     positionals: Vec<String>,
     fields: Option<Vec<&'static str>>,
     len_tolerance: f64,
+    sources: confusables::Sources,
 }
 
 fn print_usage() {
@@ -164,6 +171,7 @@ fn print_usage() {
          \x20                           sets exit code. Batch: filters output; exit 1 if none match.\n\
          \x20   -m, --metric <AXIS>     Numeric axis for -t and --sort (default skeleton_damerau)\n\
          \x20       --fields <LIST>     Comma-separated axes to show (default: all). See AXES.\n\
+         \x20       --confusables <LIST> Confusable sources for skeletons: uts39,flowcrypt,digraph (default uts39)\n\
          \x20       --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)\n\
          \x20   -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL\n\
          \x20       --string <S>        (with --list) the single string to compare\n\
@@ -204,6 +212,7 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
         positionals: Vec::new(),
         fields: None,
         len_tolerance: 0.25,
+        sources: confusables::Sources::default(),
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -242,6 +251,10 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
             "--fields" => {
                 let v = args.next().ok_or("--fields needs a value")?;
                 opts.fields = Some(parse_fields(&v)?);
+            }
+            "--confusables" => {
+                let v = args.next().ok_or("--confusables needs a value")?;
+                opts.sources = confusables::parse_sources(&v)?;
             }
             "--len-tolerance" => {
                 let v = args.next().ok_or("--len-tolerance needs a value")?;
@@ -306,6 +319,12 @@ fn main() -> ExitCode {
 
     use std::io::{self, BufRead, Write};
 
+    let cmap = if opts.sources == confusables::Sources::default() {
+        confusables::ConfusableMap::uts39()
+    } else {
+        confusables::ConfusableMap::from_sources(&opts.sources)
+    };
+
     // List mode: score --string against each line of --list, emit input/match JSONL.
     if let (Some(string), Some(path)) = (opts.string.as_ref(), opts.list.as_ref()) {
         let file = match std::fs::File::open(path) {
@@ -327,6 +346,7 @@ fn main() -> ExitCode {
                 opts.threshold,
                 opts.sort,
                 opts.top,
+                &cmap,
             );
             matched = !rows.is_empty();
             for (a, b, panel) in &rows {
@@ -339,7 +359,7 @@ fn main() -> ExitCode {
         } else {
             for raw in lines {
                 if let Some((a, b, panel)) =
-                    score_candidate(string, &raw, opts.metric, opts.threshold)
+                    score_candidate(string, &raw, opts.metric, opts.threshold, &cmap)
                 {
                     matched = true;
                     let _ = writeln!(
@@ -379,7 +399,7 @@ fn main() -> ExitCode {
                     continue;
                 }
             };
-            let panel = score_pair(la, lb, &confusables::ConfusableMap::uts39());
+            let panel = score_pair(la, lb, &cmap);
             if let Some(t) = opts.threshold {
                 if row_metric(&panel, opts.metric) > t {
                     continue;
@@ -402,7 +422,7 @@ fn main() -> ExitCode {
     // Single-pair mode.
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
-    let panel = score_pair(a, b, &confusables::ConfusableMap::uts39());
+    let panel = score_pair(a, b, &cmap);
     if opts.json {
         println!(
             "{}",
@@ -542,6 +562,7 @@ mod tests {
             None,
             true,
             Some(2),
+            &cmap(),
         );
         assert_eq!(out.len(), 2);
         assert!(row_metric(&out[0].2, "skeleton_damerau").abs() < 1e-9);
@@ -554,6 +575,7 @@ mod tests {
             Some(0.0),
             false,
             None,
+            &cmap(),
         );
         assert_eq!(out2.len(), 2);
 
@@ -564,25 +586,39 @@ mod tests {
             None,
             false,
             None,
+            &cmap(),
         );
         assert_eq!(out3.len(), 1);
     }
 
     #[test]
     fn score_candidate_trims_skips_and_thresholds() {
-        assert!(score_candidate("paypal", "", "skeleton_damerau", None).is_none());
-        assert!(score_candidate("paypal", "   ", "skeleton_damerau", None).is_none());
+        assert!(score_candidate("paypal", "", "skeleton_damerau", None, &cmap()).is_none());
+        assert!(score_candidate("paypal", "   ", "skeleton_damerau", None, &cmap()).is_none());
 
-        let r = score_candidate("paypal", "  p\u{0430}ypal  ", "skeleton_damerau", None)
-            .expect("should score");
+        let r = score_candidate(
+            "paypal",
+            "  p\u{0430}ypal  ",
+            "skeleton_damerau",
+            None,
+            &cmap(),
+        )
+        .expect("should score");
         assert_eq!(r.0, "paypal");
         assert_eq!(r.1, "p\u{0430}ypal");
         assert_eq!(r.2.get("confusable_only"), Some(AxisValue::Bool(true)));
 
-        assert!(score_candidate("paypal", "zzzzzz", "skeleton_damerau", Some(0.0)).is_none());
         assert!(
-            score_candidate("paypal", "p\u{0430}ypal", "skeleton_damerau", Some(0.0)).is_some()
+            score_candidate("paypal", "zzzzzz", "skeleton_damerau", Some(0.0), &cmap()).is_none()
         );
+        assert!(score_candidate(
+            "paypal",
+            "p\u{0430}ypal",
+            "skeleton_damerau",
+            Some(0.0),
+            &cmap()
+        )
+        .is_some());
     }
 
     #[test]
@@ -782,5 +818,34 @@ mod tests {
             !p.contains("unknown"),
             "commit must be resolved, not 'unknown': {p}"
         );
+    }
+
+    #[test]
+    fn parse_confusables_flag() {
+        let o = parse_from(vec![
+            "--confusables".into(),
+            "uts39,digraph".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        assert!(o.sources.digraph && !o.sources.flowcrypt);
+    }
+
+    #[test]
+    fn parse_confusables_default_is_uts39() {
+        let o = parse_from(vec!["a".into(), "b".into()]).unwrap();
+        assert_eq!(o.sources, confusables::Sources::default());
+    }
+
+    #[test]
+    fn parse_confusables_rejects_unknown() {
+        assert!(parse_from(vec![
+            "--confusables".into(),
+            "uts39,nope".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .is_err());
     }
 }
