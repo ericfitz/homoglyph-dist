@@ -65,13 +65,16 @@ The crate's `detect_restriction_level` for `&str` already performs the
 Latin-exclusion pass and the Cyrillic/Greek demotion the research flagged as
 easy to get wrong by hand — confirming the crate decision.
 
-**Behavioral nuance (important, verified):** `pаypal` (Latin `p,y,p,a,l` +
-Cyrillic `а`) does NOT resolve to a low level — the Latin∩Cyrillic resolved set
-is empty, and Cyrillic is excluded from the moderate tier, so it lands at
-`MinimallyRestrictive` (4) / `Unrestricted` (5). That is the desired signal:
-**a homoglyph spoof scores high.** Conversely legitimate Japanese
-(Han+Hiragana+Katakana) collapses to `HighlyRestrictive` (2), NOT inflated — the
-crate's augmented-set logic handles it.
+**Behavioral nuance (important, verified empirically against the crate):**
+`pаypal` (Latin `p,y,p,a,l` + Cyrillic `а`) does NOT resolve to a low level — the
+Latin∩Cyrillic resolved set is empty, and Cyrillic is excluded from the moderate
+tier, so it lands at `MinimallyRestrictive` (4) / `Unrestricted` (5). That is the
+desired signal: **a homoglyph spoof scores high.** Conversely legitimate
+*pure* Japanese with NO Latin (Han+Hiragana, e.g. `日本の`) resolves to a
+non-empty augmented set `{Jpan}` ⇒ `SingleScript` (**1**), NOT inflated — the
+crate's augmented-set logic handles it. (`HighlyRestrictive` (2) is specifically
+for Latin + Japanese/Korean/Bopomofo *mixes*, not for pure CJK.) The
+FP-avoidance test asserts the pure-Japanese pair scores **1**.
 
 ## The axis
 
@@ -144,8 +147,9 @@ Unit tests in `src/axes.rs` (via the existing `run(a, b) -> Panel` helper):
   the spoof scores suspicious). This is the headline case.
 - Pure single-script non-Latin pair (two Greek words, e.g. `αβγ`/`αβδ`) → 1
   (`SingleScript`).
-- Legitimate Japanese single string vs itself (e.g. a Han+Hiragana mix) → 2
-  (`HighlyRestrictive`), NOT inflated — guards the documented FP-avoidance.
+- Legitimate pure-Japanese string vs itself (Han+Hiragana, no Latin, e.g.
+  `日本の`) → 1 (`SingleScript`), NOT inflated — guards the documented
+  FP-avoidance. (Pure CJK is single-script; only Latin+CJK mixes reach level 2.)
 - `max` behavior: pair a level-0 ASCII string with a mixed-script string → the
   pair takes the higher level (assert the result equals the mixed string's level,
   not 0).
