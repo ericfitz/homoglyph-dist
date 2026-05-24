@@ -180,7 +180,8 @@ fn print_usage() {
          \x20   uts39_skeleton_delta    damerau - skeleton_damerau; edits that vanish under\n\
          \x20                           skeletonization (experimental, may change)\n\
          \x20   confusable_only         true when the strings differ but share an identical skeleton\n\
-         \x20   script_restriction      UTS#39 restriction level 0-5 (higher = more mixed-script/suspicious)\n\n\
+         \x20   script_restriction      UTS#39 restriction level 0-5 (higher = more mixed-script/suspicious)\n\
+         \x20   keyboard_distance       mean QWERTY key distance over substitutions, 0-1 (n/a if non-ASCII)\n\n\
          OUTPUT KEYS: single-pair/stdin use a,b; list mode uses input,match. Batch is JSONL.\n"
     );
 }
@@ -713,6 +714,14 @@ mod tests {
         ])
         .unwrap();
         assert!((o.len_tolerance - 0.4).abs() < 1e-9);
+    }
+
+    #[test]
+    fn na_metric_value_is_infinity() {
+        // keyboard_distance is NA for a non-ASCII pair; row_metric falls back to
+        // +inf so the row never matches a finite -t and sorts last.
+        let panel = score_pair("paypal", "p\u{0430}ypal");
+        assert!(row_metric(&panel, "keyboard_distance").is_infinite());
     }
 
     #[test]

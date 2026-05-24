@@ -40,7 +40,7 @@ Typical uses:
 
 ## Axes
 
-`sqdist` computes a panel of 9 independent axes for each pair. The `--help`
+`sqdist` computes a panel of 10 independent axes for each pair. The `--help`
 AXES block and JSON key order:
 
 ```
@@ -56,6 +56,7 @@ AXES:
                             skeletonization (experimental, may change)
     confusable_only         true when the strings differ but share an identical skeleton
     script_restriction      UTS#39 restriction level 0-5 (higher = more mixed-script/suspicious)
+    keyboard_distance       mean QWERTY key distance over substitutions, 0-1 (n/a if non-ASCII)
 ```
 
 The homoglyph model uses the **official Unicode UTS #39 confusables data**
@@ -189,6 +190,9 @@ piece is also fine — results are independent per line.)
 | `uts39_skeleton_delta` | int | damerau − skeleton_damerau; edits that vanish under skeletonization **(experimental)** |
 | `confusable_only` | bool | true when strings differ but share an identical skeleton — highest-confidence spoof signal |
 | `script_restriction` | int | UTS#39 restriction level 0–5 of the pair (max of the two strings' levels); higher = more mixed-script and more suspicious. Direction: higher = more different/suspicious. |
+| `keyboard_distance` | float\|null | mean physical US-QWERTY key distance over the substituted positions, normalized to [0,1]; near 0 = adjacent-key fat-finger typo, near 1 = far-apart/deliberate. Direction: higher = more different/suspicious. NA (JSON `null`, human `n/a`) when either string contains a non-ASCII character (keyboard distance is undefined there); zero substitutions = 0.0 (accurate). Self-contained QWERTY table (`src/keyboard.rs`); no dependency. |
+
+`AxisValue` has an `NA` variant that renders as JSON `null` and human `n/a`; `keyboard_distance` uses it when either string is non-ASCII.
 
 Single-pair and batch (stdin) modes use keys `a` and `b`; list mode uses `input` and `match`. Batch and list modes emit JSONL.
 
@@ -208,6 +212,7 @@ uts39_confusable_count   1
 uts39_skeleton_delta     1
 confusable_only          true
 script_restriction       4
+keyboard_distance        n/a
 
 [LIKELY SPOOF] The strings differ by 1 edit, but every differing character is a homoglyph (the strings are visually identical). High likelihood of an attempt to confuse.
 ```
@@ -219,7 +224,7 @@ sqdist -j paypal pаypal   # second 'a' is Cyrillic
 ```
 
 ```json
-{"a":"paypal","b":"pаypal","equal":false,"levenshtein":1,"damerau":1,"skeleton_levenshtein":0,"skeleton_damerau":0,"uts39_confusable_count":1,"uts39_skeleton_delta":1,"confusable_only":true,"script_restriction":4}
+{"a":"paypal","b":"pаypal","equal":false,"levenshtein":1,"damerau":1,"skeleton_levenshtein":0,"skeleton_damerau":0,"uts39_confusable_count":1,"uts39_skeleton_delta":1,"confusable_only":true,"script_restriction":4,"keyboard_distance":null}
 ```
 
 ### Selecting axes
@@ -329,7 +334,7 @@ sqdist --version
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # unit tests in each module's #[cfg(test)] block; currently 64 tests
+cargo test               # unit tests in each module's #[cfg(test)] block; currently 76 tests
 ```
 
 The confusables table is embedded at compile time (`src/confusables_data.rs`,
