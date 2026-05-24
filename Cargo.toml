@@ -19,6 +19,7 @@ include = [
     "/LICENSE-MIT",
     "/LICENSE-APACHE",
     "/scripts/gen_confusables.py",
+    "/scripts/gen_flowcrypt.py",
 ]
 
 [[bin]]

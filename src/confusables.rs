@@ -56,8 +56,23 @@ impl ConfusableMap {
     /// supplements are merged in only for keys UTS#39 does not already define
     /// (UTS#39 wins on collision).
     pub fn from_sources(sources: &Sources) -> Self {
-        let singles: Vec<(u32, &'static str)> = CONFUSABLES.to_vec();
-        // CONFUSABLES is already sorted by key; keep it sorted.
+        // UTS#39 is the always-on base, sorted by key.
+        let mut singles: Vec<(u32, &'static str)> = CONFUSABLES.to_vec();
+        if sources.flowcrypt {
+            // Merge FlowCrypt entries only for keys UTS#39 does not already
+            // define (UTS#39 wins). Collect additions first so we never
+            // binary-search `singles` while mutating it, then extend + re-sort.
+            let mut add: Vec<(u32, &'static str)> = Vec::new();
+            for &(cp, sk) in crate::flowcrypt_data::FLOWCRYPT {
+                if singles.binary_search_by(|&(k, _)| k.cmp(&cp)).is_err()
+                    && !add.iter().any(|&(k, _)| k == cp)
+                {
+                    add.push((cp, sk));
+                }
+            }
+            singles.extend(add);
+            singles.sort_by_key(|&(k, _)| k);
+        }
         let digraphs: &'static [(&'static str, &'static str)] = if sources.digraph {
             crate::digraph_data::DIGRAPHS
         } else {
@@ -253,5 +268,31 @@ mod tests {
         assert_eq!(m.skeleton("cl"), "d");
         // mid-word: "vvallet" -> "wallet"-skeleton.
         assert_eq!(m.skeleton("vvallet"), m.skeleton("wallet"));
+    }
+
+    #[test]
+    fn flowcrypt_source_collapses_lookalike_when_enabled() {
+        // U+00E0 (à) is a FlowCrypt look-alike of ASCII 'a' (from flowcrypt_data.rs)
+        // and is NOT a UTS#39 confusable, so it only collapses with flowcrypt on.
+        let look = '\u{00E0}';
+        let off = ConfusableMap::uts39();
+        let on = ConfusableMap::from_sources(&Sources {
+            flowcrypt: true,
+            digraph: false,
+        });
+        assert!(!off.confusable(look, 'a'), "off by default");
+        assert!(on.confusable(look, 'a'), "collapses to 'a' under flowcrypt");
+    }
+
+    #[test]
+    fn uts39_wins_over_flowcrypt_on_collision() {
+        // Cyrillic а (U+0430) is in BOTH UTS#39 (-> 'a') and the FlowCrypt table.
+        // With flowcrypt on, the UTS#39 mapping must be used (precedence), so it
+        // still skeletons to 'a' — never double-inserted or overridden.
+        let on = ConfusableMap::from_sources(&Sources {
+            flowcrypt: true,
+            digraph: false,
+        });
+        assert_eq!(on.skeleton("\u{0430}"), on.skeleton("a"));
     }
 }

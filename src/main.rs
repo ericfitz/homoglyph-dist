@@ -10,6 +10,7 @@ mod confusables;
 mod confusables_data;
 mod digraph_data;
 mod distance;
+mod flowcrypt_data;
 mod keyboard;
 mod verdict;
 
@@ -217,6 +218,7 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
                     env!("SQDIST_GIT_SHA")
                 );
                 println!("  data: {}", confusables_data::CONFUSABLES_PROVENANCE);
+                println!("  data: {}", flowcrypt_data::FLOWCRYPT_PROVENANCE);
                 std::process::exit(0);
             }
             "-j" | "--json" => opts.json = true,
@@ -769,5 +771,16 @@ mod tests {
         let p = confusables_data::CONFUSABLES_PROVENANCE;
         assert!(p.contains("UTS#39"), "provenance names the standard: {p}");
         assert!(p.contains("17.0.0"), "provenance names the version: {p}");
+    }
+
+    #[test]
+    fn version_includes_flowcrypt_provenance() {
+        let p = flowcrypt_data::FLOWCRYPT_PROVENANCE;
+        assert!(p.contains("FlowCrypt"), "names the source: {p}");
+        assert!(p.contains("retrieved"), "carries a retrieval date: {p}");
+        assert!(
+            !p.contains("unknown"),
+            "commit must be resolved, not 'unknown': {p}"
+        );
     }
 }
