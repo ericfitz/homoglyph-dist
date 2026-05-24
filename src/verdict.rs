@@ -100,7 +100,8 @@ mod tests {
     use crate::axes::{build_panel, PairContext};
 
     fn panel(a: &str, b: &str) -> Panel {
-        build_panel(&PairContext::new(a, b))
+        let cmap = crate::confusables::ConfusableMap::uts39();
+        build_panel(&PairContext::new(a, b, &cmap))
     }
 
     #[test]

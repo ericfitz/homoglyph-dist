@@ -5,6 +5,7 @@
 //! human-row order, and `--fields`/`--metric` validation. `PairContext` holds
 //! the once-per-pair precomputation (char vecs, skeletons, alignment).
 
+use crate::confusables::ConfusableMap;
 use crate::distance::{self, AlignOp};
 use unicode_security::{RestrictionLevel, RestrictionLevelDetection};
 
@@ -89,21 +90,22 @@ pub struct PairContext<'a> {
     pub b: &'a str,
     pub ca: Vec<char>,
     pub cb: Vec<char>,
-    #[allow(dead_code)] // string-form skeletons; consumed by Phase 4 skeleton work
+    #[allow(dead_code)] // string-form skeletons; used in tests + consumed by Phase 4 threading
     pub ska: String,
-    #[allow(dead_code)] // string-form skeletons; consumed by Phase 4 skeleton work
+    #[allow(dead_code)] // string-form skeletons; used in tests + consumed by Phase 4 threading
     pub skb: String,
     pub sva: Vec<char>,
     pub svb: Vec<char>,
     pub align: Vec<AlignOp>,
+    pub cmap: &'a ConfusableMap,
 }
 
 impl<'a> PairContext<'a> {
-    pub fn new(a: &'a str, b: &'a str) -> Self {
+    pub fn new(a: &'a str, b: &'a str, cmap: &'a ConfusableMap) -> Self {
         let ca: Vec<char> = a.chars().collect();
         let cb: Vec<char> = b.chars().collect();
-        let ska = distance::skeleton(a);
-        let skb = distance::skeleton(b);
+        let ska = cmap.skeleton(a);
+        let skb = cmap.skeleton(b);
         let sva: Vec<char> = ska.chars().collect();
         let svb: Vec<char> = skb.chars().collect();
         let align = distance::align(&ca, &cb);
@@ -117,6 +119,7 @@ impl<'a> PairContext<'a> {
             sva,
             svb,
             align,
+            cmap,
         }
     }
 }
@@ -251,7 +254,7 @@ impl Axis for Uts39ConfusableCount {
                 AlignOp::Sub(i, j) => Some((*i, *j)),
                 _ => None,
             })
-            .filter(|&(i, j)| distance::confusable(ctx.ca[i], ctx.cb[j]))
+            .filter(|&(i, j)| ctx.cmap.confusable(ctx.ca[i], ctx.cb[j]))
             .count();
         AxisValue::Int(count as u64)
     }
@@ -477,8 +480,8 @@ mod tests {
     use super::*;
 
     fn run(a: &str, b: &str) -> Panel {
-        let ctx = PairContext::new(a, b);
-        build_panel(&ctx)
+        let cmap = crate::confusables::ConfusableMap::uts39();
+        build_panel(&PairContext::new(a, b, &cmap))
     }
 
     #[test]
@@ -604,7 +607,8 @@ mod tests {
 
     #[test]
     fn pair_context_precomputes_skeletons_and_alignment() {
-        let ctx = PairContext::new("paypal", "p\u{0430}ypal");
+        let cmap = crate::confusables::ConfusableMap::uts39();
+        let ctx = PairContext::new("paypal", "p\u{0430}ypal", &cmap);
         assert_eq!(ctx.ca.len(), 6);
         assert_eq!(ctx.cb.len(), 6);
         // Cyrillic а collapses to Latin a in the skeleton.

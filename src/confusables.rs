@@ -1,0 +1,214 @@
+//! The runtime confusable model: the active single-char skeleton map and digraph
+//! rules for a run, selected by `--confusables`. Distinct from the generated
+//! `confusables_data` (UTS#39), `flowcrypt_data`, and `digraph_data` tables.
+
+use crate::confusables_data::CONFUSABLES;
+
+/// Which supplemental confusable sources are enabled. UTS#39 is always on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Sources {
+    pub flowcrypt: bool,
+    pub digraph: bool,
+}
+
+/// Parse a `--confusables` comma-list into `Sources`. `uts39` is always on
+/// (listing it is a no-op; omitting it does not disable it). Unknown source →
+/// Err naming the offender + valid names. Empty/whitespace → default (uts39).
+/// Wired into the CLI by Task 4 (`--confusables` flag in `parse_from`).
+#[allow(dead_code)]
+pub fn parse_sources(spec: &str) -> Result<Sources, String> {
+    let mut s = Sources::default();
+    for raw in spec.split(',') {
+        let name = raw.trim();
+        if name.is_empty() {
+            continue;
+        }
+        match name {
+            "uts39" => {}
+            "flowcrypt" => s.flowcrypt = true,
+            "digraph" => s.digraph = true,
+            other => {
+                return Err(format!(
+                    "unknown confusable source: {other} (valid: uts39, flowcrypt, digraph)"
+                ));
+            }
+        }
+    }
+    Ok(s)
+}
+
+/// The active confusable model for a run.
+pub struct ConfusableMap {
+    /// code point -> skeleton string, sorted by key. UTS#39 entries take
+    /// precedence on key collision.
+    singles: Vec<(u32, &'static str)>,
+    /// (digraph source, replacement); longest-match-first. Empty unless enabled.
+    digraphs: &'static [(&'static str, &'static str)],
+}
+
+impl ConfusableMap {
+    /// UTS#39-only map (the default).
+    pub fn uts39() -> Self {
+        Self::from_sources(&Sources::default())
+    }
+
+    /// Build from the enabled source set. UTS#39 is always the base; enabled
+    /// supplements are merged in only for keys UTS#39 does not already define
+    /// (UTS#39 wins on collision). (flowcrypt/digraph wired in later tasks; for
+    /// now this builds the UTS#39-only map regardless of flags.)
+    pub fn from_sources(_sources: &Sources) -> Self {
+        let singles: Vec<(u32, &'static str)> = CONFUSABLES.to_vec();
+        // CONFUSABLES is already sorted by key; keep it sorted.
+        ConfusableMap {
+            singles,
+            digraphs: &[],
+        }
+    }
+
+    /// Skeleton of one char via the single-char map. None if unmapped.
+    pub fn skeleton_of(&self, c: char) -> Option<&str> {
+        let cp = c as u32;
+        self.singles
+            .binary_search_by(|&(k, _)| k.cmp(&cp))
+            .ok()
+            .map(|i| self.singles[i].1)
+    }
+
+    /// Are two chars confusable under this map's single-char skeletons?
+    pub fn confusable(&self, a: char, b: char) -> bool {
+        if a == b {
+            return true;
+        }
+        let mut sa_buf = [0u8; 4];
+        let mut sb_buf = [0u8; 4];
+        let sa = self
+            .skeleton_of(a)
+            .unwrap_or_else(|| a.encode_utf8(&mut sa_buf));
+        let sb = self
+            .skeleton_of(b)
+            .unwrap_or_else(|| b.encode_utf8(&mut sb_buf));
+        sa == sb
+    }
+
+    /// Full skeleton of a string: longest-match-first over digraph source keys,
+    /// else per-char single-char mapping, else the char unchanged. Single,
+    /// non-recursive pass.
+    pub fn skeleton(&self, s: &str) -> String {
+        let chars: Vec<char> = s.chars().collect();
+        let mut out = String::with_capacity(s.len());
+        let mut buf = [0u8; 4];
+        let mut i = 0;
+        while i < chars.len() {
+            // Try digraphs longest-first. Current keys are all length 2; the
+            // matcher is written to try longer keys first for future-proofing.
+            let mut best_len = 0usize;
+            let mut best_rep = "";
+            for &(src, rep) in self.digraphs {
+                let klen = src.chars().count();
+                if klen > best_len && i + klen <= chars.len() {
+                    let window: String = chars[i..i + klen].iter().collect();
+                    if window == src {
+                        best_len = klen;
+                        best_rep = rep;
+                    }
+                }
+            }
+            if best_len > 0 {
+                out.push_str(best_rep);
+                i += best_len;
+            } else {
+                let c = chars[i];
+                match self.skeleton_of(c) {
+                    Some(sk) => out.push_str(sk),
+                    None => out.push_str(c.encode_utf8(&mut buf)),
+                }
+                i += 1;
+            }
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn m() -> ConfusableMap {
+        ConfusableMap::uts39()
+    }
+
+    #[test]
+    fn digit_letter_confusable() {
+        let m = m();
+        assert!(m.confusable('1', 'l'));
+        assert!(m.confusable('0', 'O'));
+        assert!(!m.confusable('0', 'o'));
+        assert!(m.confusable('I', 'l'));
+        assert!(!m.confusable('x', 'y'));
+    }
+
+    #[test]
+    fn skeleton_maps_multichar() {
+        let m = m();
+        assert_eq!(m.skeleton("microsoft"), m.skeleton("rnicrosoft"));
+        assert_eq!(m.skeleton("microsoft"), "rnicrosoft");
+    }
+
+    #[test]
+    fn skeleton_is_idempotent_for_uts39() {
+        let m = m();
+        for s in [
+            "microsoft",
+            "paypal",
+            "vvallet",
+            "g\u{43E}\u{43E}gle",
+            "abc123",
+        ] {
+            assert_eq!(
+                m.skeleton(&m.skeleton(s)),
+                m.skeleton(s),
+                "not idempotent for {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn skeleton_collapses_homoglyphs() {
+        let m = m();
+        assert_eq!(m.skeleton("p\u{0430}ypal"), m.skeleton("paypal"));
+        assert_eq!(m.skeleton("xyz"), "xyz");
+        assert_eq!(m.skeleton(""), "");
+    }
+
+    #[test]
+    fn vv_w_and_cl_d_are_not_uts39_confusables_by_default() {
+        // Default (uts39 only): the vv/w, cl/d gaps STAY (digraph source off).
+        let m = m();
+        assert_ne!(m.skeleton("vv"), m.skeleton("w"));
+        assert_ne!(m.skeleton("cl"), m.skeleton("d"));
+        assert_eq!(m.skeleton("m"), "rn"); // m->rn IS uts39, for contrast.
+    }
+
+    #[test]
+    fn parse_sources_default_and_all() {
+        assert_eq!(parse_sources("uts39").unwrap(), Sources::default());
+        assert_eq!(parse_sources("").unwrap(), Sources::default());
+        let all = parse_sources("uts39,flowcrypt,digraph").unwrap();
+        assert!(all.flowcrypt && all.digraph);
+        // dedup / order-insensitive
+        assert_eq!(
+            parse_sources("digraph,digraph").unwrap(),
+            Sources {
+                flowcrypt: false,
+                digraph: true
+            }
+        );
+    }
+
+    #[test]
+    fn parse_sources_rejects_unknown() {
+        let e = parse_sources("uts39,bogus").unwrap_err();
+        assert!(e.contains("bogus"), "names offender: {e}");
+        assert!(e.contains("flowcrypt"), "lists valid: {e}");
+    }
+}

@@ -6,6 +6,7 @@
 //! the single-pair human verdict.
 
 mod axes;
+mod confusables;
 mod confusables_data;
 mod distance;
 mod keyboard;
@@ -22,8 +23,8 @@ use verdict::verdict;
 type Row = (String, String, Panel);
 
 /// Compute the panel for a pair.
-fn score_pair(a: &str, b: &str) -> Panel {
-    build_panel(&PairContext::new(a, b))
+fn score_pair(a: &str, b: &str, cmap: &confusables::ConfusableMap) -> Panel {
+    build_panel(&PairContext::new(a, b, cmap))
 }
 
 /// The selected axis keys to emit, in canonical order: all when None.
@@ -100,7 +101,8 @@ fn score_candidate(string: &str, raw: &str, metric: &str, threshold: Option<f64>
     if line.is_empty() {
         return None;
     }
-    let panel = score_pair(string, line);
+    let cmap = confusables::ConfusableMap::uts39();
+    let panel = score_pair(string, line, &cmap);
     if let Some(t) = threshold {
         if row_metric(&panel, metric) > t {
             return None;
@@ -374,7 +376,7 @@ fn main() -> ExitCode {
                     continue;
                 }
             };
-            let panel = score_pair(la, lb);
+            let panel = score_pair(la, lb, &confusables::ConfusableMap::uts39());
             if let Some(t) = opts.threshold {
                 if row_metric(&panel, opts.metric) > t {
                     continue;
@@ -397,7 +399,7 @@ fn main() -> ExitCode {
     // Single-pair mode.
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
-    let panel = score_pair(a, b);
+    let panel = score_pair(a, b, &confusables::ConfusableMap::uts39());
     if opts.json {
         println!(
             "{}",
@@ -421,9 +423,13 @@ mod tests {
     use super::*;
     use axes::AxisValue;
 
+    fn cmap() -> confusables::ConfusableMap {
+        confusables::ConfusableMap::uts39()
+    }
+
     #[test]
     fn result_json_uses_given_keys_and_all_axes() {
-        let panel = score_pair("paypal", "p\u{0430}ypal");
+        let panel = score_pair("paypal", "p\u{0430}ypal", &cmap());
         let line = result_json("paypal", "p\u{0430}ypal", &panel, ("a", "b"), None);
         assert!(line.starts_with("{\"a\":\"paypal\""));
         assert!(line.contains("\"damerau\":"));
@@ -440,7 +446,7 @@ mod tests {
 
     #[test]
     fn result_json_respects_field_filter() {
-        let panel = score_pair("GOOGLE", "GO0GLE");
+        let panel = score_pair("GOOGLE", "GO0GLE", &cmap());
         let only = parse_fields("damerau,confusable_only").unwrap();
         let line = result_json("GOOGLE", "GO0GLE", &panel, ("a", "b"), Some(&only));
         assert!(line.starts_with("{\"a\":\"GOOGLE\",\"b\":\"GO0GLE\""));
@@ -456,17 +462,17 @@ mod tests {
             (
                 "abc".to_string(),
                 "abXYZ".to_string(),
-                score_pair("abc", "abXYZ"),
+                score_pair("abc", "abXYZ", &cmap()),
             ),
             (
                 "abc".to_string(),
                 "abc".to_string(),
-                score_pair("abc", "abc"),
+                score_pair("abc", "abc", &cmap()),
             ),
             (
                 "abc".to_string(),
                 "abd".to_string(),
-                score_pair("abc", "abd"),
+                score_pair("abc", "abd", &cmap()),
             ),
         ];
         let sorted = sort_and_truncate(rows, "skeleton_damerau", None);
@@ -484,12 +490,12 @@ mod tests {
             (
                 "abc".to_string(),
                 "abd".to_string(),
-                score_pair("abc", "abd"),
+                score_pair("abc", "abd", &cmap()),
             ),
             (
                 "abc".to_string(),
                 "abc".to_string(),
-                score_pair("abc", "abc"),
+                score_pair("abc", "abc", &cmap()),
             ),
         ];
         let top1 = sort_and_truncate(rows2, "skeleton_damerau", Some(1));
@@ -503,12 +509,12 @@ mod tests {
             (
                 "x".to_string(),
                 "first".to_string(),
-                score_pair("x", "first"),
+                score_pair("x", "first", &cmap()),
             ),
             (
                 "x".to_string(),
                 "secnd".to_string(),
-                score_pair("x", "secnd"),
+                score_pair("x", "secnd", &cmap()),
             ),
         ];
         let a = row_metric(&rows[0].2, "skeleton_damerau");
@@ -721,7 +727,7 @@ mod tests {
     fn na_metric_value_is_infinity() {
         // keyboard_distance is NA for a non-ASCII pair; row_metric falls back to
         // +inf so the row never matches a finite -t and sorts last.
-        let panel = score_pair("paypal", "p\u{0430}ypal");
+        let panel = score_pair("paypal", "p\u{0430}ypal", &cmap());
         assert!(row_metric(&panel, "keyboard_distance").is_infinite());
     }
 
