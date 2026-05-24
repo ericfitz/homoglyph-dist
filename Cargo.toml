@@ -25,6 +25,9 @@ include = [
 name = "sqdist"
 path = "src/main.rs"
 
+[dependencies]
+unicode-security = "0.1.2"
+
 [profile.release]
 opt-level = 3
 lto = true
