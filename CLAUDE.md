@@ -4,14 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`sqdist` — a single-binary Rust CLI that computes three string-distance metrics between two strings for **typosquatting / homoglyph attack detection**: Levenshtein, Damerau-Levenshtein (OSA, adjacent transpositions), and a **homoglyph-weighted Damerau** where confusable-character substitutions cost a fraction of an edit (default 0.1). The point is to separate a visual spoof (`pаypal` with Cyrillic а) from a benign typo (`gogle`) that has identical unweighted distance.
+`sqdist` — a single-binary Rust CLI that computes a **panel of independent similarity axes** across two strings for **typosquatting / homoglyph attack detection**: Levenshtein, Damerau-Levenshtein (OSA, adjacent transpositions), their UTS#39-skeleton variants, and confusable-involvement signals. The point is to separate a visual spoof (`pаypal` with Cyrillic а) — which collapses to zero skeleton distance — from a benign typo (`gogle`) that has identical unweighted distance but no confusable characters.
 
 ## Commands
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # 6 unit tests in src/main.rs (one per metric + confusable logic)
-cargo test <name>        # run a single test, e.g. cargo test digit_letter_confusable
+cargo test               # unit tests live in each module's #[cfg(test)] block; cargo test runs all (currently 56)
+cargo test <name>        # run a single test, e.g. cargo test confusable_only_axis
 cargo run -- <A> <B>     # run against two strings (note the -- before args)
 ```
 
@@ -19,10 +19,13 @@ There is no separate lint config; use `cargo clippy` and `cargo fmt --check`.
 
 ## Architecture
 
-Two source files plus build-time helpers:
+Five source files plus build-time helpers:
 
-- [src/main.rs](src/main.rs) — everything: distance algorithms, the confusable model, arg parsing, single-pair and `--stdin` batch modes, and the test module. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
-- [src/confusables_data.rs](src/confusables_data.rs) — **auto-generated, do not hand-edit.** A `static CONFUSABLES: &[(u32, &str)]` slice (~6565 entries) sorted by code point, embedded at compile time so the binary needs no runtime data files or network.
+- [src/main.rs](src/main.rs) — CLI arg parsing (`Opts`), I/O, the three modes (single-pair / `--stdin` batch / `--string`+`--list` watchlist), output formatting (human table + JSONL), and orchestration calling the panel + verdict. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
+- [src/distance.rs](src/distance.rs) — edit distances (unweighted integer `levenshtein`, `damerau` OSA), the UTS#39 skeleton model (`skeleton_of`, `skeleton`, `confusable`), and the alignment traceback (`AlignOp` + `align`).
+- [src/axes.rs](src/axes.rs) — the `Axis` trait, `AxisValue` (Int/Float/Bool), `Direction`, `Phase`, `PairContext` (per-pair precompute), the 8 axis impls, `ALL_AXES` registry (canonical order = single source of truth for JSON key order and emit order), the two-phase base/derived `build_panel`, and `--fields`/`--metric` parsing and validation (`parse_fields`, `validate_metric`, `metric_value`).
+- [src/verdict.rs](src/verdict.rs) — `Verdict` enum + `verdict()`, reading the panel (single-pair human output only).
+- [src/confusables_data.rs](src/confusables_data.rs) — **auto-generated, do not hand-edit.** A `pub static CONFUSABLES: &[(u32, &str)]` slice (~6565 entries) sorted by code point, embedded at compile time so the binary needs no runtime data files or network.
 - [build.rs](build.rs) — compile-time git SHA capture (runs `git rev-parse --short HEAD`, exposes `SQDIST_GIT_SHA` env var, falls back to "unknown" for crates.io/git-less builds).
 - [scripts/gen_confusables.py](scripts/gen_confusables.py) — regenerates `confusables_data.rs` from Unicode UTS #39 `confusables.txt`. Pure stdlib (no dependencies); resolves its paths relative to the repo root, so run it from anywhere.
 
@@ -36,29 +39,28 @@ Three modes, dispatched by a thin `main()`:
 | stdin batch | `--stdin` | pre-paired tab/comma lines | `a`/`b` |
 | watchlist | `--string` + `--list` | `--string` × each file line | `input`/`match` |
 
-The logic lives in pure, unit-tested functions — `skeleton`, `score_pair`,
-`metric_value`, `sort_and_truncate`, `process_list`, `result_json`, `parse_from(Vec<String>)` arg parser, `verdict`, `parse_fields`, `selected_fields`, and `batch_matched_ok` — plus the `Field` and `Verdict` enums and `Field::value_string` method — with `main()` only doing I/O dispatch.
+### The 8-axis panel (canonical order)
+
+The `ALL_AXES` registry in `axes.rs` defines the canonical order — this controls JSON key order and human-output row order. Axes are computed in two phases: base axes are pure functions of a `PairContext`; derived axes read already-computed base axis values.
+
+| Key | Type | Phase | Meaning |
+|---|---|---|---|
+| `equal` | bool | base | the two strings are byte-identical |
+| `levenshtein` | int | base | min single-char insert/delete/substitute edits |
+| `damerau` | int | base | like levenshtein, but an adjacent transposition (swap) counts as one edit |
+| `skeleton_levenshtein` | int | base | levenshtein after reducing both strings to their UTS#39 skeletons |
+| `skeleton_damerau` | int | base | damerau after reducing both to UTS#39 skeletons (~0 when visually identical, incl. multi-char confusables like m↔rn) |
+| `uts39_confusable_count` | int | base | # of substitution positions in the Damerau alignment whose two chars are UTS#39-confusable **(EXPERIMENTAL, may change)** |
+| `uts39_skeleton_delta` | int | derived | damerau − skeleton_damerau (saturating at 0); edits that vanish under skeletonization **(EXPERIMENTAL, may change)** |
+| `confusable_only` | bool | derived | true when the strings differ but share an identical skeleton (highest-confidence spoof signal) |
 
 ### The confusable model (the conceptual core)
 
-Two characters are confusable when they share the same **skeleton** under UTS #39. `skeleton_of` does a binary search over the sorted `CONFUSABLES` slice; `confusable(a, b)` compares skeletons (falling back to the char itself when unmapped), which transitively handles confusable chains (Greek omicron, Cyrillic о, and Latin o all skeleton to the same thing, so all three are mutually confusable). `sub_cost` is the single hook where the homoglyph weight enters the otherwise-standard edit-distance DP. Skeleton comparison is **case-sensitive** per UTS #39 (`0`~`O` but not `0`~`o`) — tests encode this, don't "fix" it.
+Two characters are confusable when they share the same **skeleton** under UTS #39. `skeleton_of` (in `distance.rs`) does a binary search over the sorted `CONFUSABLES` slice; `confusable(a, b)` compares skeletons (falling back to the char itself when unmapped), which transitively handles confusable chains (Greek omicron, Cyrillic о, and Latin o all skeleton to the same thing, so all three are mutually confusable). Skeleton comparison is **case-sensitive** per UTS #39 (`0`~`O` but not `0`~`o`) — tests encode this, don't "fix" it.
 
 ### Multi-character skeletonization (implemented)
 
-`skeleton(s: &str)` builds the full UTS#39 skeleton of a string (each code point
-mapped through the confusables table and concatenated), so the multi-character
-confusables that UTS#39 *defines* ARE caught. Among ASCII letters this is
-essentially just `m` ↔ `rn` (the skeleton of `m` is `rn`). These surface in
-`skeleton_damerau` (≈0 for a pure multi-char spoof) and set `confusable_only`
-to `true` (defined as `a != b && skeleton(a) == skeleton(b)`, no equal-length
-requirement). IMPORTANT: UTS#39 does NOT define reverse mappings like `vv`→`w`,
-`cl`→`d`, or `nn`→`m` (their right-hand sides are not source code points in the
-table), so those spoofs are NOT caught and report `confusable_only` false — a
-known gap, candidate for a future curated supplemental table. The per-char
-`homoglyph_damerau` metric does NOT collapse multi-char sequences — keeping both
-lets a caller distinguish a few homoglyph substitutions from a fully-confusable
-string. Leetspeak (`3`→`e`) is intentionally excluded (UTS #39 does not treat it
-as visually confusable).
+`skeleton(s: &str)` builds the full UTS#39 skeleton of a string (each code point mapped through the confusables table and concatenated), so the multi-character confusables that UTS#39 *defines* ARE caught. Among ASCII letters this is essentially just `m` ↔ `rn` (the skeleton of `m` is `rn`). These surface in `skeleton_damerau` (≈0 for a pure multi-char spoof) and set `confusable_only` to `true` (defined as `a != b && skeleton(a) == skeleton(b)`, no equal-length requirement). IMPORTANT: UTS#39 does NOT define reverse mappings like `vv`→`w`, `cl`→`d`, or `nn`→`m` (their right-hand sides are not source code points in the table), so those spoofs are NOT caught and report `confusable_only` false — a known gap, candidate for a future curated supplemental table. Leetspeak (`3`→`e`) is intentionally excluded (UTS #39 does not treat it as visually confusable).
 
 ## Regenerating the confusables table
 
@@ -74,17 +76,15 @@ cargo test                   # confirm the embedded table still satisfies the co
 
 ## Output contract
 
-Both human and JSON output expose the same fields, relied on by downstream pipelines — keep the JSON key names stable:
+**v0.3.0 BREAKING CHANGE:** The JSON output schema changed significantly from v0.2.0. Downstream parsers must update key names. Keys removed: `homoglyph_damerau`, `normalized`, `skeleton_normalized`. Keys added: `equal`, `skeleton_levenshtein`, `uts39_confusable_count`, `uts39_skeleton_delta`. The `--hogl-weight`/`-w` flag is gone (now an unknown-option error). `--metric` now takes an axis key (default `skeleton_damerau`) rather than `homoglyph|skeleton`.
 
-- `levenshtein`, `damerau`, `homoglyph_damerau` — three distance metrics
-- `skeleton_damerau` — distance after full-string skeletonization (multi-char confusables caught)
-- `normalized` — `homoglyph_damerau / max(len_a, len_b)`
-- `skeleton_normalized` — `skeleton_damerau / max(len(skeleton(a)), len(skeleton(b)))`
-- `confusable_only` — true when strings differ but are identical after skeletonization (highest-confidence spoof signal)
+Both human and JSON output expose the same fields, relied on by downstream pipelines — keep the JSON key names stable. Canonical key order and meaning: see the 8-axis panel table above.
 
-**Field filtering:** `--fields <comma-list>` filters which score fields are displayed/emitted in all modes. Identifier keys (`a`/`b` or `input`/`match`) are always preserved; fields emit in canonical order. Note that `-t`/`--metric`/`--sort` operate on the full internal scores regardless of `--fields` setting.
+**Field filtering:** `--fields <comma-list>` filters which axes are displayed/emitted in all modes. Field names are validated against the axis keys in `ALL_AXES`; an invalid name produces an error listing the valid keys. Identifier keys (`a`/`b` or `input`/`match`) are always preserved; fields emit in canonical `ALL_AXES` order. Note that `-t`/`--metric`/`--sort` operate on the full internal scores regardless of `--fields` setting.
 
-**Single-pair human verdict:** Single-pair human output appends an interpretation verdict line: `[IDENTICAL]`, `[LIKELY SPOOF]`, or `[LIKELY BENIGN]` with explanation. This is produced by the pure `verdict(scores, len_a, len_b, len_tolerance)` function and appears only in human mode (NOT in JSON or batch modes). Spoof rule: `confusable_only || (homoglyph_share > 0.5 && max(len) >= 3 && len_diff_ratio <= len_tolerance)`, where `homoglyph_share = (damerau - skeleton_damerau) / damerau`. Tune with `--len-tolerance` (default 0.25, range [0,1]).
+**`--metric <axis>`:** Selects which numeric axis drives `-t` (threshold) and `--sort`. Default: `skeleton_damerau`. The two bool axes (`equal`, `confusable_only`) are rejected with an error listing the valid numeric axis keys.
+
+**Single-pair human verdict:** Single-pair human output appends an interpretation verdict line: `[IDENTICAL]`, `[LIKELY SPOOF]`, or `[LIKELY BENIGN]` with explanation. This is produced by `verdict()` in `verdict.rs` and appears only in human mode (NOT in JSON or batch modes). Spoof rule: `confusable_only || (homoglyph_share > 0.5 && max(len) >= 3 && len_diff_ratio <= len_tolerance)`, where `homoglyph_share = uts39_skeleton_delta / damerau`. Tune with `--len-tolerance` (default 0.25, range [0,1]).
 
 **Batch exit codes:** Batch modes (`--stdin`, `--list`) with `-t` exit 1 when zero rows match; 0 otherwise. Without `-t`, always exit 0.
 
@@ -94,4 +94,4 @@ Both human and JSON output expose the same fields, relied on by downstream pipel
 - Single pair (two positionals) and `--stdin` batch: JSON keys `a`, `b`
 - Watchlist (`--string` + `--list`): JSON keys `input`, `match`
 
-**Batch and list output:** always JSONL (one JSON object per line). With `-t` threshold: emits only lines at/under the threshold. `-m/--metric` (default `skeleton`) selects which distance drives `-t` and `--sort`.
+**Batch and list output:** always JSONL (one JSON object per line). With `-t` threshold: emits only lines at/under the threshold. `-m/--metric` (default `skeleton_damerau`) selects which numeric axis drives `-t` and `--sort`.

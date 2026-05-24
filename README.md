@@ -17,9 +17,9 @@ main families of name-based impersonation attack:
 
 The hard part is that a homoglyph spoof and an innocent typo can have the
 **exact same** edit distance, so plain Levenshtein can't separate them. The
-homoglyph-weighted metric (below) makes genuine spoofs sink toward zero distance
-while real typos stay near 1.0, so you can alert on spoofs without false-alarming
-on honest fat-finger typos.
+skeleton-distance axes (below) make genuine spoofs collapse toward zero
+distance while real typos stay near 1.0, so you can alert on spoofs without
+false-alarming on honest fat-finger typos.
 
 Typical uses:
 
@@ -29,13 +29,33 @@ Typical uses:
   popular names to catch malicious lookalikes before they're installed.
 - **Phishing / fraud filtering** — flag deceptive sender names or URLs.
 
-It computes three distances between two strings:
+## Breaking changes in v0.3.0 (upgrading from 0.2.x)
 
-| Metric | Catches |
-|---|---|
-| **Levenshtein** | insertions, deletions, substitutions (`gogle`, `gooogle`) |
-| **Damerau-Levenshtein** | the above **+ adjacent transpositions** as a single edit (`googel`) — matches real keyboard typos |
-| **Homoglyph-weighted Damerau** | confusable-character substitutions cost a small fraction of an edit, so visually-identical spoofs (`pаypal` with Cyrillic а) float to the top of your alerts |
+**JSON schema changed.** Downstream parsers must update:
+
+- **Removed keys:** `homoglyph_damerau`, `normalized`, `skeleton_normalized`
+- **Added keys:** `equal`, `skeleton_levenshtein`, `uts39_confusable_count`, `uts39_skeleton_delta`
+- **`--hogl-weight`/`-w` is removed** — unknown-option error if used
+- **`--metric` now takes an axis key** (e.g. `skeleton_damerau`) instead of `homoglyph|skeleton`; default is `skeleton_damerau`
+
+## Axes
+
+`sqdist` computes a panel of 8 independent axes for each pair. The `--help`
+AXES block and JSON key order:
+
+```
+AXES:
+    equal                   the strings are byte-identical (bool)
+    levenshtein             min single-char insert/delete/substitute edits
+    damerau                 like levenshtein, but an adjacent swap counts as one edit
+    skeleton_levenshtein    levenshtein after reducing both to UTS#39 skeletons
+    skeleton_damerau        damerau after reducing both to UTS#39 skeletons
+                            (~0 when visually identical, incl. multi-char confusables)
+    uts39_confusable_count  # of aligned substitutions that are UTS#39-confusable (experimental)
+    uts39_skeleton_delta    damerau - skeleton_damerau; edits that vanish under
+                            skeletonization (experimental, may change)
+    confusable_only         true when the strings differ but share an identical skeleton
+```
 
 The homoglyph model uses the **official Unicode UTS #39 confusables data**
 (`confusables.txt`, v17.0.0), the same authoritative source attacker tooling
@@ -44,21 +64,20 @@ targets. Two characters are treated as confusable when they share the same
 chains (e.g. Greek omicron → Latin o, Cyrillic о → Latin o, so all three are
 mutually confusable).
 
-## Why the homoglyph weight matters
+## Why the skeleton axes matter
 
 A homoglyph spoof and a benign typo can have **identical** Levenshtein/Damerau
-distance. The weighted metric separates them — and the skeleton column also
-collapses multi-char confusables (`rn`→`m`) that the per-character homoglyph
-column misses:
+distance. The skeleton columns collapse homoglyphs — and also handle multi-char
+confusables (`rn`→`m`) that per-character approaches miss:
 
 ```
-                          lev  damerau  homoglyph  skeleton  confusable_only
-paypal vs pаypal           1      1        0.1        0        true   <- homoglyph spoof
-rnicrosoft vs microsoft    2      2        2          0        true   <- multi-char spoof
-google vs gogle            1      1        1          1        false  <- benign typo
+                          lev  damerau  skeleton_lev  skeleton_dam  uts39_delta  confusable_only
+paypal vs pаypal           1      1          0             0             1          true   <- homoglyph spoof
+rnicrosoft vs microsoft    2      2          0             0             2          true   <- multi-char spoof
+google vs gogle            1      1          1             1             0          false  <- benign typo
 ```
 
-Set a threshold (e.g. `-t 0.5`) to alert only on the spoofs.
+Set a threshold (e.g. `-t 1 -m skeleton_damerau`) to alert only on the spoofs.
 
 ## Usage
 
@@ -68,11 +87,10 @@ sqdist [OPTIONS] --stdin                    # batch: pre-paired lines
 sqdist [OPTIONS] --string <S> --list <FILE> # score <S> vs each line
 
 OPTIONS:
-    -w, --hogl-weight <F>   Cost of a homoglyph substitution (default 0.1)
     -t, --threshold <F>     Alert when the --metric distance <= F. Single-pair:
                             sets exit code. Batch: filters output; exit 1 if none match.
-    -m, --metric <M>        Distance for -t and --sort: homoglyph|skeleton (default skeleton)
-        --fields <LIST>     Comma-separated fields to show (default: all). See FIELD MEANINGS.
+    -m, --metric <AXIS>     Numeric axis for -t and --sort (default skeleton_damerau)
+        --fields <LIST>     Comma-separated axes to show (default: all). See AXES.
         --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)
     -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL
         --string <S>        (with --list) the single string to compare
@@ -89,7 +107,7 @@ OPTIONS:
 ```sh
 sqdist paypal pаypal          # human-readable
 sqdist -j microsoft micrоsoft # JSON
-sqdist -t 0.5 apple аpple && echo "ALERT: likely spoof"
+sqdist -t 1 apple аpple && echo "ALERT: likely spoof"
 ```
 
 ### Batch / pipeline (the real security workflow)
@@ -99,14 +117,14 @@ JSON line per pair; with `-t` it emits **only alerts** at/under the threshold:
 
 ```sh
 # scan npm/pypi candidate names against your brand watchlist
-generate_pairs | sqdist --stdin -t 0.5 > alerts.jsonl
+generate_pairs | sqdist --stdin -t 1 > alerts.jsonl
 ```
 
 With `-t`, batch modes exit with code 0 if at least one alert was emitted and 1 if none matched.
 Without `-t`, batch modes always exit 0. This makes it easy to use in shell conditionals:
 
 ```sh
-if generate_pairs | sqdist --stdin -t 0.5 > alerts.jsonl; then
+if generate_pairs | sqdist --stdin -t 1 > alerts.jsonl; then
   echo "Found suspicious matches"
 else
   echo "All clear"
@@ -126,8 +144,8 @@ you'd screen registry/Artifactory package names against a known-good name:
 # emit JSONL (input/match keys), most-suspicious first, top 10
 sqdist --string paypal --list candidates.txt --sort --top 10
 
-# alert-only: skeleton distance at/under the threshold
-sqdist --string paypal --list candidates.txt -t 0.5
+# alert-only: skeleton_damerau distance at/under the threshold
+sqdist --string paypal --list candidates.txt -t 1
 ```
 
 #### Memory usage on large lists
@@ -151,28 +169,61 @@ resident memory then scales with the number of rows kept:
 Rough rule of thumb when sorting: `peak_MB ≈ 2 (baseline) + rows × (100 + 2 × avg_name_len) / 1e6`.
 
 `-t` cuts this down further even when sorting: a threshold drops non-matching
-rows *before* they're buffered, so `--sort -t 0.5` over a million lines that
+rows *before* they're buffered, so `--sort -t 1` over a million lines that
 alerts on only a handful stays near the ~2 MB baseline. So: stream by default;
 add `-t` (and optionally `--top`) when you want a ranked view of a very large
 list without holding it all in memory. (Chunking a huge list and scanning each
 piece is also fine — results are independent per line.)
 
-## Output fields
+## Output axes
 
-- `levenshtein` / `damerau` — integer edit counts (unweighted)
-- `homoglyph_damerau` — Damerau distance where confusable substitutions cost `--hogl-weight`
-- `normalized` — `homoglyph_damerau / max(len_a, len_b)`, a 0–1 similarity-ish score for ranking
-- `skeleton_damerau` — Damerau distance computed on the two strings' full UTS#39 skeletons; ~0 when they are visually identical including multi-char confusables.
-- `skeleton_normalized` — `skeleton_damerau / max(skeleton_len_a, skeleton_len_b)`, a 0–1 score for ranking.
-- `confusable_only` — `true` when the strings differ but are **identical after skeletonization** (a pure homoglyph attack with zero real edits) — your highest-confidence signal
+| Key | Type | Meaning |
+|---|---|---|
+| `equal` | bool | the strings are byte-identical |
+| `levenshtein` | int | min single-char insert/delete/substitute edits |
+| `damerau` | int | like levenshtein, but an adjacent swap counts as one edit |
+| `skeleton_levenshtein` | int | levenshtein after reducing both to UTS#39 skeletons |
+| `skeleton_damerau` | int | damerau after reducing both to UTS#39 skeletons; ~0 when visually identical including multi-char confusables |
+| `uts39_confusable_count` | int | # of aligned substitutions that are UTS#39-confusable **(experimental)** |
+| `uts39_skeleton_delta` | int | damerau − skeleton_damerau; edits that vanish under skeletonization **(experimental)** |
+| `confusable_only` | bool | true when strings differ but share an identical skeleton — highest-confidence spoof signal |
 
 Single-pair and batch (stdin) modes use keys `a` and `b`; list mode uses `input` and `match`. Batch and list modes emit JSONL.
 
-### Selecting fields
+### Example: single-pair human output
 
-The `--fields` flag restricts output to a comma-separated list of fields. The identifier keys (a/b in single-pair and stdin, input/match in list mode) are always included regardless. Fields are printed in canonical order regardless of the input order.
+```sh
+sqdist paypal pаypal   # second 'a' is Cyrillic
+```
 
-Example: show only Damerau and confusable_only fields for a pair:
+```
+equal                    false
+levenshtein              1
+damerau                  1
+skeleton_levenshtein     0
+skeleton_damerau         0
+uts39_confusable_count   1
+uts39_skeleton_delta     1
+confusable_only          true
+
+[LIKELY SPOOF] The strings differ by 1 edit, but every differing character is a homoglyph (the strings are visually identical). High likelihood of an attempt to confuse.
+```
+
+### Example: single-pair JSON output
+
+```sh
+sqdist -j paypal pаypal   # second 'a' is Cyrillic
+```
+
+```json
+{"a":"paypal","b":"pаypal","equal":false,"levenshtein":1,"damerau":1,"skeleton_levenshtein":0,"skeleton_damerau":0,"uts39_confusable_count":1,"uts39_skeleton_delta":1,"confusable_only":true}
+```
+
+### Selecting axes
+
+The `--fields` flag restricts output to a comma-separated list of axis keys. The identifier keys (a/b in single-pair and stdin, input/match in list mode) are always included regardless. Axes are printed in canonical order regardless of the input order. Invalid axis names produce an error listing the valid keys.
+
+Example: show only damerau and confusable_only:
 
 ```sh
 sqdist --fields damerau,confusable_only GOOGLE GO0GLE
@@ -186,7 +237,7 @@ confusable_only      true
 [LIKELY SPOOF] The strings differ by 1 edit, but every differing character is a homoglyph (the strings are visually identical). High likelihood of an attempt to confuse.
 ```
 
-The same fields in JSON output:
+The same axes in JSON output:
 
 ```sh
 sqdist -j --fields damerau,confusable_only GOOGLE GO0GLE
@@ -197,23 +248,18 @@ Output:
 {"a":"GOOGLE","b":"GO0GLE","damerau":1,"confusable_only":true}
 ```
 
-Invalid field names produce an error.
+### Selecting the metric axis
+
+`-m/--metric <AXIS>` selects which numeric axis drives `-t` (threshold filtering and exit code) and `--sort`. Default: `skeleton_damerau`. The two bool axes (`equal`, `confusable_only`) are not valid metric axes and produce an error listing the valid numeric keys.
+
+```sh
+sqdist -m skeleton_damerau -t 1 paypal pаypal
+sqdist --string microsoft --list candidates.txt --sort -m levenshtein
+```
 
 ### Interpretation verdict (single-pair)
 
-In single-pair human output (not `-j` JSON, not batch modes), a verdict line appears below the field table:
-
-```
-levenshtein          1
-damerau              1
-homoglyph_damerau    0.1
-skeleton_damerau     0
-normalized           0.0167
-skeleton_normalized  0.0000
-confusable_only      true
-
-[LIKELY SPOOF] The strings differ by 1 edit, but every differing character is a homoglyph (the strings are visually identical). High likelihood of an attempt to confuse.
-```
+In single-pair human output (not `-j` JSON, not batch modes), a verdict line appears below the axis table:
 
 The verdict is one of:
 - `[IDENTICAL]` — the two strings are identical
@@ -221,7 +267,7 @@ The verdict is one of:
 - `[LIKELY BENIGN]` — a real typo or legitimate edit
 
 A likely spoof is signaled when:
-- All differing characters are homoglyphs (confusable_only = true), **OR**
+- All differing characters are homoglyphs (`confusable_only = true`), **OR**
 - Homoglyphs account for more than half the Damerau distance within a length tolerance (default `--len-tolerance 0.25`)
 
 This verdict helps distinguish attacks from honest typos and appears only in single-pair human output — it's never emitted in JSON mode or batch modes.
@@ -238,9 +284,6 @@ distance. The classic example is the letter **m**, whose UTS#39 skeleton is
 
 This surfaces in the `skeleton_damerau` field (~0 for a pure multi-char spoof)
 and sets `confusable_only` to `true`, even when the strings differ in length.
-The `homoglyph_damerau` field uses per-character weighting and does NOT collapse
-multi-char sequences, so comparing the two fields distinguishes "a few homoglyph
-substitutions" from "fully visually confusable".
 
 ### What is *not* caught
 
@@ -276,14 +319,14 @@ To check your installed version:
 
 ```sh
 sqdist --version
-# sqdist 0.2.0 (d430de5)
+# sqdist 0.3.0 (d430de5)
 ```
 
 ## Building
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # 38 unit tests covering metrics, skeletonization, confusable logic, arg parsing, and list mode
+cargo test               # unit tests in each module's #[cfg(test)] block; currently 56 tests
 ```
 
 The confusables table is embedded at compile time (`src/confusables_data.rs`,
