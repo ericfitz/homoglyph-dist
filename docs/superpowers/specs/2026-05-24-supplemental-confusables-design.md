@@ -184,17 +184,60 @@ attribution comment in `flowcrypt_data.rs` (FlowCrypt, MIT).
 > unavailable in the build environment, the generator must accept a `--input
 > <path>` so a manually-downloaded copy works.
 
+## Data-source provenance in `-v`/`--version` (required)
+
+**Every embedded external data source must carry its version+date provenance, and
+`-v` must expose it.** Where a source has no clear version (or changes its data
+without reversioning), track the upstream repo **commit id** the data was retrieved
+from, plus the retrieval date.
+
+- **UTS#39 confusables** (`confusables_data.rs`, pre-existing): has a clear version.
+  `gen_confusables.py` emits `pub static CONFUSABLES_PROVENANCE: &str = "UTS#39
+  confusables.txt v<UNICODE_VERSION> (<date>)";` (e.g. `v17.0.0 (2025-07-22)` — the
+  values already in the file's header comment, now promoted to a constant).
+- **FlowCrypt** (`flowcrypt_data.rs`, new): the `idn-homographs-database` repo has
+  **no releases/tags** — data on `master` can change without reversioning — so track
+  the **commit SHA** + retrieval date. `gen_flowcrypt.py` resolves and embeds
+  `pub static FLOWCRYPT_PROVENANCE: &str = "FlowCrypt idn-homographs-database @
+  <short-sha> (retrieved <date>)";`. The generator obtains the commit SHA from the
+  GitHub API (`/repos/FlowCrypt/idn-homographs-database/commits/master`) or, when
+  given a local `--input`, from a `--source-commit <sha>`/`--source-date <date>`
+  argument the operator supplies.
+
+**`-v` output format (chosen — multi-line):** line 1 unchanged, then one indented
+`data:` line per embedded source, always printed (the tables are compiled in
+regardless of `--confusables`):
+```
+sqdist 0.3.0 (d256784)
+  data: UTS#39 confusables.txt v17.0.0 (2025-07-22)
+  data: FlowCrypt idn-homographs-database @ a1b2c3d (retrieved 2026-05-24)
+```
+`main.rs`'s version arm prints `env!("CARGO_PKG_VERSION")` + `SQDIST_GIT_SHA` (line
+1) then `confusables_data::CONFUSABLES_PROVENANCE` and
+`flowcrypt_data::FLOWCRYPT_PROVENANCE` (the `data:` lines). The digraph source is
+**hand-authored, not external data**, so it has no provenance line (its "version" is
+the source tree itself; document this in the digraph_data.rs comment). This format
+scales: each new external data table adds its own `*_PROVENANCE` constant and one
+`data:` line.
+
+This requirement applies whether or not FlowCrypt ships in this phase; since
+FlowCrypt IS shipping here, both provenance constants land now. (Retrofitting the
+UTS#39 provenance constant is a small change to `gen_confusables.py` +
+`confusables_data.rs` + the `-v` arm.)
+
 ## File layout / change set
 
 | File | Change |
 |---|---|
 | `src/confusables.rs` | NEW. `ConfusableMap`, `Sources`, `from_sources`, `skeleton_of`/`confusable`/`skeleton` methods (+ digraph longest-match), source parsing/validation. Unit tests. |
 | `src/digraph_data.rs` | NEW. The 4-entry `DIGRAPHS` table + FP-mitigation comment. |
-| `src/flowcrypt_data.rs` | NEW (generated). `pub static FLOWCRYPT: &[(u32,&str)]`. |
-| `scripts/gen_flowcrypt.py` | NEW. Stdlib generator (filter + anchor + dedup + conflict log). |
+| `src/flowcrypt_data.rs` | NEW (generated). `pub static FLOWCRYPT: &[(u32,&str)]` + `pub static FLOWCRYPT_PROVENANCE: &str` (repo commit + retrieval date). |
+| `scripts/gen_flowcrypt.py` | NEW. Stdlib generator (filter + anchor + dedup + conflict log); resolves the source commit SHA (GitHub API or `--source-commit`) and emits `FLOWCRYPT_PROVENANCE`. |
+| `src/confusables_data.rs` | regenerate to add `pub static CONFUSABLES_PROVENANCE: &str = "UTS#39 confusables.txt v17.0.0 (2025-07-22)";` (promote the header-comment version to a constant). |
+| `scripts/gen_confusables.py` | emit the `CONFUSABLES_PROVENANCE` constant from the Unicode version/date it already parses. |
 | `src/distance.rs` | REMOVE `skeleton_of`/`skeleton`/`confusable` (moved to confusables.rs); keep `levenshtein`/`damerau`/`align`/`AlignOp`. |
 | `src/axes.rs` | `PairContext::new(a, b, &ConfusableMap)`; build skeletons via the map; `Uts39ConfusableCount` uses `cmap.confusable`. (Note: the `uts39_confusable_count` axis still counts via the map's `confusable`, which now may include supplements when enabled — see "Naming note".) |
-| `src/main.rs` | add `mod confusables; mod digraph_data; mod flowcrypt_data;`; parse `--confusables`; build the `ConfusableMap` once; thread `&cmap` into all `PairContext::new` calls; add a `--confusables` line to `--help`. |
+| `src/main.rs` | add `mod confusables; mod digraph_data; mod flowcrypt_data;`; parse `--confusables`; build the `ConfusableMap` once; thread `&cmap` into all `PairContext::new` calls; add a `--confusables` line to `--help`; extend the `-v`/`--version` arm to print the two `data:` provenance lines after line 1. |
 | `README.md`, `CLAUDE.md` | document `--confusables`, the sources, the "less authoritative / opt-in" caveat, the regeneration command, and the new module/data files. |
 | `Cargo.toml` | `include` list: add `scripts/gen_flowcrypt.py` (mirrors the existing `gen_confusables.py` include). No new dependency. Version stays 0.3.0. |
 
@@ -248,6 +291,11 @@ menu without speculative logic shipped now.
 - `--confusables` parsing via `parse_from` (default, valid combos, unknown → err).
 - End-to-end: `--confusables=uts39,digraph` makes `devflovv`/`devflow` score
   `confusable_only:true` / `skeleton_damerau:0`; default does not.
+- **Provenance:** `-v`/`--version` output contains both `data:` lines — a test
+  asserting `CONFUSABLES_PROVENANCE` mentions `UTS#39`/`17.0.0` and
+  `FLOWCRYPT_PROVENANCE` mentions `FlowCrypt` + a commit/date (both non-empty,
+  exact format pinned). Confirm the constants compile-in regardless of
+  `--confusables` (the tables are always embedded).
 
 `scripts/gen_flowcrypt.py`: a small self-test or a documented manual check (the
 generator is stdlib; at minimum, running it on the real input produces a
