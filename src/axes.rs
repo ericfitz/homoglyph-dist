@@ -598,11 +598,12 @@ mod tests {
 
     #[test]
     fn parse_fields_all_keys() {
-        let all = parse_fields(
-            "equal,levenshtein,damerau,skeleton_levenshtein,skeleton_damerau,uts39_confusable_count,uts39_skeleton_delta,confusable_only",
-        )
-        .unwrap();
-        assert_eq!(all.len(), 8);
+        // Every registry key round-trips through parse_fields (guards against
+        // drift when axes are added).
+        let spec = all_keys().join(",");
+        let parsed = parse_fields(&spec).unwrap();
+        assert_eq!(parsed.len(), all_keys().len());
+        assert_eq!(parsed, all_keys());
     }
 
     #[test]

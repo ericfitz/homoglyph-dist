@@ -178,7 +178,8 @@ fn print_usage() {
          \x20   uts39_confusable_count  # of aligned substitutions that are UTS#39-confusable (experimental)\n\
          \x20   uts39_skeleton_delta    damerau - skeleton_damerau; edits that vanish under\n\
          \x20                           skeletonization (experimental, may change)\n\
-         \x20   confusable_only         true when the strings differ but share an identical skeleton\n\n\
+         \x20   confusable_only         true when the strings differ but share an identical skeleton\n\
+         \x20   script_restriction      UTS#39 restriction level 0-5 (higher = more mixed-script/suspicious)\n\n\
          OUTPUT KEYS: single-pair/stdin use a,b; list mode uses input,match. Batch is JSONL.\n"
     );
 }

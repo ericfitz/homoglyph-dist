@@ -40,7 +40,7 @@ Typical uses:
 
 ## Axes
 
-`sqdist` computes a panel of 8 independent axes for each pair. The `--help`
+`sqdist` computes a panel of 9 independent axes for each pair. The `--help`
 AXES block and JSON key order:
 
 ```
@@ -55,6 +55,7 @@ AXES:
     uts39_skeleton_delta    damerau - skeleton_damerau; edits that vanish under
                             skeletonization (experimental, may change)
     confusable_only         true when the strings differ but share an identical skeleton
+    script_restriction      UTS#39 restriction level 0-5 (higher = more mixed-script/suspicious)
 ```
 
 The homoglyph model uses the **official Unicode UTS #39 confusables data**
@@ -187,6 +188,7 @@ piece is also fine — results are independent per line.)
 | `uts39_confusable_count` | int | # of aligned substitutions that are UTS#39-confusable **(experimental)** |
 | `uts39_skeleton_delta` | int | damerau − skeleton_damerau; edits that vanish under skeletonization **(experimental)** |
 | `confusable_only` | bool | true when strings differ but share an identical skeleton — highest-confidence spoof signal |
+| `script_restriction` | int | UTS#39 restriction level 0–5 of the pair (max of the two strings' levels); higher = more mixed-script and more suspicious. Direction: higher = more different/suspicious. |
 
 Single-pair and batch (stdin) modes use keys `a` and `b`; list mode uses `input` and `match`. Batch and list modes emit JSONL.
 
@@ -326,12 +328,13 @@ sqdist --version
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # unit tests in each module's #[cfg(test)] block; currently 56 tests
+cargo test               # unit tests in each module's #[cfg(test)] block; currently 64 tests
 ```
 
 The confusables table is embedded at compile time (`src/confusables_data.rs`,
-auto-generated from `confusables.txt`), so the binary is fully self-contained —
-no runtime data files, no network.
+auto-generated from `confusables.txt`), so **no runtime data files or network
+access** are needed for confusables. sqdist has one compiled dependency:
+`unicode-security` (MIT/Apache-2.0), used for the `script_restriction` axis.
 
 ## Regenerating the confusables table
 
