@@ -29,14 +29,25 @@ Typical uses:
   popular names to catch malicious lookalikes before they're installed.
 - **Phishing / fraud filtering** — flag deceptive sender names or URLs.
 
-## Breaking changes in v0.3.0 (upgrading from 0.2.x)
+## Installing
 
-**JSON schema changed.** Downstream parsers must update:
+```sh
+# Homebrew (macOS) — prebuilt, signed, notarized universal binary
+brew install ericfitz/tap/sqdist
 
-- **Removed keys:** `homoglyph_damerau`, `normalized`, `skeleton_normalized`
-- **Added keys:** `equal`, `skeleton_levenshtein`, `uts39_confusable_count`, `uts39_skeleton_delta`
-- **`--hogl-weight`/`-w` is removed** — unknown-option error if used
-- **`--metric` now takes an axis key** (e.g. `skeleton_damerau`) instead of `homoglyph|skeleton`; default is `skeleton_damerau`
+# Cargo (any platform with the Rust toolchain) — builds from source
+cargo install sqdist
+```
+
+You can also grab a signed `.pkg` installer or the universal tarball directly
+from the [latest release](https://github.com/ericfitz/sqdist/releases/latest).
+
+To check your installed version:
+
+```sh
+sqdist --version
+# sqdist 0.3.0 (d430de5)
+```
 
 ## Axes
 
@@ -351,26 +362,6 @@ The `flowcrypt` source is derived from the
 [FlowCrypt idn-homographs-database](https://github.com/FlowCrypt/idn-homographs-database),
 licensed under the MIT License. The embedded data is pinned to commit `f27b783`
 (dated 2021-05-26, retrieved 2026-05-24).
-
-## Installing
-
-```sh
-# Homebrew (macOS) — prebuilt, signed, notarized universal binary
-brew install ericfitz/tap/sqdist
-
-# Cargo (any platform with the Rust toolchain) — builds from source
-cargo install sqdist
-```
-
-You can also grab a signed `.pkg` installer or the universal tarball directly
-from the [latest release](https://github.com/ericfitz/sqdist/releases/latest).
-
-To check your installed version:
-
-```sh
-sqdist --version
-# sqdist 0.3.0 (d430de5)
-```
 
 ## Building
 
