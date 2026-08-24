@@ -94,10 +94,84 @@ pub fn verdict(panel: &Panel, len_a: usize, len_b: usize, len_tolerance: f64) ->
     (Verdict::LikelyBenign, msg)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)] // wired by --typosquat profile (later task)
+pub enum TyposquatClass {
+    Identical,
+    SameProject,
+    LikelyTyposquat,
+    Unrelated,
+}
+
+impl TyposquatClass {
+    #[allow(dead_code)] // wired by --typosquat profile (later task)
+    pub fn tag(self) -> &'static str {
+        match self {
+            TyposquatClass::Identical => "IDENTICAL",
+            TyposquatClass::SameProject => "SAME PROJECT",
+            TyposquatClass::LikelyTyposquat => "LIKELY TYPOSQUAT",
+            TyposquatClass::Unrelated => "UNRELATED",
+        }
+    }
+    #[allow(dead_code)] // wired by --typosquat profile (later task)
+    pub fn json_key(self) -> &'static str {
+        match self {
+            TyposquatClass::Identical => "identical",
+            TyposquatClass::SameProject => "same_project",
+            TyposquatClass::LikelyTyposquat => "likely_typosquat",
+            TyposquatClass::Unrelated => "unrelated",
+        }
+    }
+}
+
+#[allow(dead_code)] // wired by --typosquat profile (later task)
+pub fn classify_typosquat(
+    originals_equal: bool,
+    same_project: bool,
+    panel: &Panel,
+    scored_len_a: usize,
+    scored_len_b: usize,
+) -> (TyposquatClass, String) {
+    if originals_equal {
+        return (
+            TyposquatClass::Identical,
+            "The strings are identical.".into(),
+        );
+    }
+    if same_project {
+        return (
+            TyposquatClass::SameProject,
+            "The names differ only by registry normalization (same project).".into(),
+        );
+    }
+    let dam = int_axis(panel, "damerau");
+    let confusable_only = bool_axis(panel, "confusable_only");
+    let long = scored_len_a.max(scored_len_b);
+    let likely = (confusable_only || dam <= 1) && long >= 3;
+    if likely {
+        let reason = if confusable_only {
+            "Strings differ but share a confusable skeleton (visual lookalike).".into()
+        } else {
+            let mut r = "1 Damerau edit.".to_string();
+            if let Some(AxisValue::Float(k)) = panel.get("keyboard_distance") {
+                if k.abs() < 1e-12 {
+                    r.push_str(" Keyboard distance 0 (no far-key substitutions).");
+                }
+            }
+            r
+        };
+        return (TyposquatClass::LikelyTyposquat, reason);
+    }
+    (
+        TyposquatClass::Unrelated,
+        "No typosquat signal (damerau > 1 and not confusable-only).".into(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::axes::{build_panel, PairContext};
+    use crate::axes::{build_panel, AxisValue, PairContext};
 
     fn panel(a: &str, b: &str) -> Panel {
         let cmap = crate::confusables::ConfusableMap::uts39();
@@ -144,5 +218,98 @@ mod tests {
         // lengths 2 vs 5 (ratio 0.6 > 0.25) -> benign.
         let (cat, _) = verdict(&panel("a0", "aOxyz"), 2, 5, 0.25);
         assert_eq!(cat, Verdict::LikelyBenign);
+    }
+
+    use super::TyposquatClass;
+
+    fn class(a: &str, b: &str, same_project: bool) -> TyposquatClass {
+        let p = panel(a, b);
+        let scored_a = a.chars().count();
+        let scored_b = b.chars().count();
+        classify_typosquat(a == b, same_project, &p, scored_a, scored_b).0
+    }
+
+    #[test]
+    fn typosquat_class_labels() {
+        assert_eq!(TyposquatClass::Identical.tag(), "IDENTICAL");
+        assert_eq!(TyposquatClass::Identical.json_key(), "identical");
+        assert_eq!(TyposquatClass::SameProject.tag(), "SAME PROJECT");
+        assert_eq!(TyposquatClass::SameProject.json_key(), "same_project");
+        assert_eq!(TyposquatClass::LikelyTyposquat.tag(), "LIKELY TYPOSQUAT");
+        assert_eq!(
+            TyposquatClass::LikelyTyposquat.json_key(),
+            "likely_typosquat"
+        );
+        assert_eq!(TyposquatClass::Unrelated.tag(), "UNRELATED");
+        assert_eq!(TyposquatClass::Unrelated.json_key(), "unrelated");
+    }
+
+    #[test]
+    fn typosquat_identical() {
+        assert_eq!(class("lodash", "lodash", false), TyposquatClass::Identical);
+    }
+
+    #[test]
+    fn typosquat_same_project_wins_over_damerau() {
+        // Raw pair would be damerau=1; identity-gate must win.
+        assert_eq!(
+            class("foo_bar", "foo-bar", true),
+            TyposquatClass::SameProject
+        );
+    }
+
+    #[test]
+    fn typosquat_lodahs_is_likely() {
+        assert_eq!(
+            class("lodash", "lodahs", false),
+            TyposquatClass::LikelyTyposquat
+        );
+    }
+
+    #[test]
+    fn typosquat_1odash_visual() {
+        assert_eq!(
+            class("lodash", "1odash", false),
+            TyposquatClass::LikelyTyposquat
+        );
+        let p = panel("lodash", "1odash");
+        assert!(matches!(
+            p.get("confusable_only"),
+            Some(AxisValue::Bool(true))
+        ));
+    }
+
+    #[test]
+    fn typosquat_rnicrosoft_despite_damerau_2() {
+        assert_eq!(
+            class("microsoft", "rnicrosoft", false),
+            TyposquatClass::LikelyTyposquat
+        );
+        let p = panel("microsoft", "rnicrosoft");
+        match p.get("damerau") {
+            Some(AxisValue::Int(n)) => assert!(n >= 2, "damerau={n}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn typosquat_go0gle() {
+        assert_eq!(
+            class("google", "go0gle", false),
+            TyposquatClass::LikelyTyposquat
+        );
+    }
+
+    #[test]
+    fn typosquat_short_unrelated() {
+        assert_eq!(class("ab", "ac", false), TyposquatClass::Unrelated);
+    }
+
+    #[test]
+    fn typosquat_combosquat_unrelated() {
+        assert_eq!(
+            class("lodash", "lodash-utils", false),
+            TyposquatClass::Unrelated
+        );
     }
 }
