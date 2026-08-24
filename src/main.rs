@@ -12,6 +12,7 @@ mod digraph_data;
 mod distance;
 mod flowcrypt_data;
 mod keyboard;
+mod normalize;
 mod verdict;
 
 use axes::{
