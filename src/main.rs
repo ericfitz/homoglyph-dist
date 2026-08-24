@@ -145,6 +145,13 @@ fn batch_matched_ok(threshold: Option<f64>, matched: bool) -> bool {
     threshold.is_none() || matched
 }
 
+#[derive(Debug, PartialEq)]
+enum NormStep {
+    Pypi,
+    File(String),
+}
+
+#[derive(Debug)]
 struct Opts {
     json: bool,
     threshold: Option<f64>,
@@ -158,6 +165,9 @@ struct Opts {
     fields: Option<Vec<&'static str>>,
     len_tolerance: f64,
     sources: confusables::Sources,
+    typosquat: bool,
+    norm_steps: Vec<NormStep>,
+    metric_explicit: bool,
 }
 
 fn print_usage() {
@@ -174,6 +184,14 @@ fn print_usage() {
          \x20       --fields <LIST>     Comma-separated axes to show (default: all). See AXES.\n\
          \x20       --confusables <LIST> Confusable sources for skeletons: uts39,flowcrypt,digraph (default uts39)\n\
          \x20       --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)\n\
+         \x20   --typosquat             Package-typosquat profile: five axes, four-way\n\
+         \x20                           classification, batch emits likely_typosquat only.\n\
+         \x20                           Default metric damerau. Cannot combine with -t.\n\
+         \x20   --pypi                  PEP 503 normalize (lower, map ._- → -, collapse -).\n\
+         \x20                           Identity-gate same-project names; otherwise score\n\
+         \x20                           normalized strings. Originals stay identifier keys.\n\
+         \x20-n, --normalize <PATH>      Append normalize ops from a JSON file (ordered\n\
+         \x20                           array of [op, ...]). Repeatable. Not a preset name.\n\
          \x20   -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL\n\
          \x20       --string <S>        (with --list) the single string to compare\n\
          \x20       --list <FILE>       (with --string) score <S> against each non-blank line\n\
@@ -214,6 +232,9 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
         fields: None,
         len_tolerance: 0.25,
         sources: confusables::Sources::default(),
+        typosquat: false,
+        norm_steps: Vec::new(),
+        metric_explicit: false,
     };
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -248,6 +269,18 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
             "-m" | "--metric" => {
                 let v = args.next().ok_or("--metric needs a value")?;
                 opts.metric = validate_metric(&v)?;
+                opts.metric_explicit = true;
+            }
+            "--typosquat" => opts.typosquat = true,
+            "--pypi" => {
+                if opts.norm_steps.iter().any(|s| matches!(s, NormStep::Pypi)) {
+                    return Err("duplicate --pypi".into());
+                }
+                opts.norm_steps.push(NormStep::Pypi);
+            }
+            "-n" | "--normalize" => {
+                let v = args.next().ok_or("--normalize needs a path")?;
+                opts.norm_steps.push(NormStep::File(v));
             }
             "--fields" => {
                 let v = args.next().ok_or("--fields needs a value")?;
@@ -273,6 +306,21 @@ fn parse_from(argv: Vec<String>) -> Result<Opts, String> {
                 return Err(format!("unknown option: {s}"));
             }
             _ => opts.positionals.push(a),
+        }
+    }
+
+    if opts.typosquat {
+        if opts.threshold.is_some() {
+            return Err("--typosquat cannot be combined with -t/--threshold".into());
+        }
+        if !opts.metric_explicit {
+            opts.metric = "damerau";
+        }
+        if opts.fields.is_none() {
+            opts.fields = Some(
+                parse_fields("equal,damerau,skeleton_damerau,confusable_only,keyboard_distance")
+                    .expect("typosquat field list is valid"),
+            );
         }
     }
 
@@ -848,5 +896,116 @@ mod tests {
             "b".into(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn parse_typosquat_defaults_metric_and_fields() {
+        let o = parse_from(vec!["--typosquat".into(), "a".into(), "b".into()]).unwrap();
+        assert!(o.typosquat);
+        assert_eq!(o.metric, "damerau");
+        assert_eq!(
+            o.fields.as_deref(),
+            Some(
+                &[
+                    "equal",
+                    "damerau",
+                    "skeleton_damerau",
+                    "confusable_only",
+                    "keyboard_distance"
+                ][..]
+            )
+        );
+    }
+
+    #[test]
+    fn parse_typosquat_metric_override_kept() {
+        let o = parse_from(vec![
+            "--typosquat".into(),
+            "-m".into(),
+            "skeleton_damerau".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        assert_eq!(o.metric, "skeleton_damerau");
+    }
+
+    #[test]
+    fn parse_typosquat_rejects_threshold() {
+        let e = parse_from(vec![
+            "--typosquat".into(),
+            "-t".into(),
+            "1".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap_err();
+        assert!(e.contains("--typosquat"), "{e}");
+        assert!(e.contains("-t"), "{e}");
+    }
+
+    #[test]
+    fn parse_pypi_and_normalize_order() {
+        let o = parse_from(vec![
+            "--pypi".into(),
+            "-n".into(),
+            "extra.json".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        assert_eq!(o.norm_steps.len(), 2);
+        assert!(matches!(o.norm_steps[0], NormStep::Pypi));
+        match &o.norm_steps[1] {
+            NormStep::File(p) => assert_eq!(p, "extra.json"),
+            other => panic!("{other:?}"),
+        }
+
+        let o2 = parse_from(vec![
+            "--normalize".into(),
+            "extra.json".into(),
+            "--pypi".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        match &o2.norm_steps[0] {
+            NormStep::File(p) => assert_eq!(p, "extra.json"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(o2.norm_steps[1], NormStep::Pypi));
+    }
+
+    #[test]
+    fn parse_normalize_pypi_is_a_filename() {
+        let o = parse_from(vec!["-n".into(), "pypi".into(), "a".into(), "b".into()]).unwrap();
+        match &o.norm_steps[..] {
+            [NormStep::File(p)] => assert_eq!(p, "pypi"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_duplicate_pypi_errors() {
+        assert!(parse_from(vec![
+            "--pypi".into(),
+            "--pypi".into(),
+            "a".into(),
+            "b".into()
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn parse_fields_overrides_typosquat_emit_set() {
+        let o = parse_from(vec![
+            "--typosquat".into(),
+            "--fields".into(),
+            "damerau".into(),
+            "a".into(),
+            "b".into(),
+        ])
+        .unwrap();
+        assert_eq!(o.fields.as_deref(), Some(&["damerau"][..]));
     }
 }
