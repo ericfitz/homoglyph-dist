@@ -143,7 +143,7 @@ generate_pairs | sqdist --stdin -t 1 > alerts.jsonl
 ```
 
 With `-t`, batch modes exit with code 0 if at least one alert was emitted and 1 if none matched.
-Without `-t`, batch modes always exit 0. This makes it easy to use in shell conditionals:
+Without `-t`, batch modes always exit 0 — except `--typosquat`, the other alert-feed path, which exits 1 if zero `likely_typosquat` rows. This makes it easy to use in shell conditionals:
 
 ```sh
 if generate_pairs | sqdist --stdin -t 1 > alerts.jsonl; then
@@ -331,16 +331,17 @@ sqdist --string microsoft --list candidates.txt --sort -m levenshtein
 
 In single-pair human output (not `-j` JSON, not batch modes), a verdict line appears below the axis table:
 
-The verdict is one of:
+In default mode, the verdict is one of:
 - `[IDENTICAL]` — the two strings are identical
 - `[LIKELY SPOOF]` — strong signal of a homoglyph attack
 - `[LIKELY BENIGN]` — a real typo or legitimate edit
+- `[SAME PROJECT]` — with `--pypi` / `-n`, when the originals differ but the normalized forms are equal
 
 A likely spoof is signaled when:
 - All differing characters are homoglyphs (`confusable_only = true`), **OR**
 - Homoglyphs account for more than half the Damerau distance within a length tolerance (default `--len-tolerance 0.25`)
 
-This verdict helps distinguish attacks from honest typos and appears only in single-pair human output — it's never emitted in JSON mode or batch modes.
+With `--typosquat`, the tags are `[IDENTICAL]` / `[SAME PROJECT]` / `[LIKELY TYPOSQUAT]` / `[UNRELATED]` instead. The human verdict line still appears only in single-pair human output; under `--typosquat`, `classification` and `reason` are also emitted in JSON (all modes).
 
 ## Multi-character homoglyphs
 
