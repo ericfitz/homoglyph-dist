@@ -20,10 +20,16 @@ use axes::{
 };
 use std::env;
 use std::process::ExitCode;
-use verdict::{classify_typosquat, verdict};
+use verdict::{classify_typosquat, verdict, TyposquatClass};
 
-/// A scored row carried through batch/list modes: the two strings + the panel.
-type Row = (String, String, Panel);
+/// A scored row carried through batch/list modes: originals, optional norms, panel.
+struct Row {
+    a: String,
+    b: String,
+    a_norm: Option<String>,
+    b_norm: Option<String>,
+    panel: Panel,
+}
 
 /// Compute the panel for a pair.
 fn score_pair(a: &str, b: &str, cmap: &confusables::ConfusableMap) -> Panel {
@@ -176,8 +182,8 @@ fn row_metric(panel: &Panel, metric: &str) -> f64 {
 /// optionally keep only the first `top`. Stable: ties preserve input order.
 fn sort_and_truncate(mut rows: Vec<Row>, metric: &str, top: Option<usize>) -> Vec<Row> {
     rows.sort_by(|x, y| {
-        row_metric(&x.2, metric)
-            .partial_cmp(&row_metric(&y.2, metric))
+        row_metric(&x.panel, metric)
+            .partial_cmp(&row_metric(&y.panel, metric))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     if let Some(n) = top {
@@ -186,30 +192,60 @@ fn sort_and_truncate(mut rows: Vec<Row>, metric: &str, top: Option<usize>) -> Ve
     rows
 }
 
+/// Keep a prepared pair as a batch row, or drop it under `--typosquat` /
+/// `-t` filters.
+fn keep_scored(s: PairScore, metric: &str, threshold: Option<f64>, typosquat: bool) -> Option<Row> {
+    if typosquat {
+        let (cat, _) = classify_typosquat(
+            s.identical,
+            s.same_project,
+            &s.panel,
+            s.scored_a.chars().count(),
+            s.scored_b.chars().count(),
+        );
+        if cat != TyposquatClass::LikelyTyposquat {
+            return None;
+        }
+    } else if let Some(t) = threshold {
+        if row_metric(&s.panel, metric) > t {
+            return None;
+        }
+    }
+    Some(Row {
+        a: s.a,
+        b: s.b,
+        a_norm: s.a_norm,
+        b_norm: s.b_norm,
+        panel: s.panel,
+    })
+}
+
 /// Score `string` against one raw candidate line. Returns the scored row, or
-/// None if blank or over threshold on the active metric.
+/// None if blank, not a likely typosquat (when filtering), or over threshold.
 fn score_candidate(
     string: &str,
     raw: &str,
     metric: &str,
     threshold: Option<f64>,
     cmap: &confusables::ConfusableMap,
+    ops: &[normalize::NormOp],
+    typosquat: bool,
 ) -> Option<Row> {
     let line = raw.trim();
     if line.is_empty() {
         return None;
     }
-    let panel = score_pair(string, line, cmap);
-    if let Some(t) = threshold {
-        if row_metric(&panel, metric) > t {
-            return None;
-        }
-    }
-    Some((string.to_string(), line.to_string(), panel))
+    keep_scored(
+        prepare_pair(string, line, ops, cmap),
+        metric,
+        threshold,
+        typosquat,
+    )
 }
 
 /// Score `string` against each line, collecting kept rows, sorting/truncating
 /// when ranking is requested.
+#[allow(clippy::too_many_arguments)] // threads ops/typosquat; tests call this directly
 fn process_list<I: Iterator<Item = String>>(
     string: &str,
     lines: I,
@@ -218,9 +254,11 @@ fn process_list<I: Iterator<Item = String>>(
     sort: bool,
     top: Option<usize>,
     cmap: &confusables::ConfusableMap,
+    ops: &[normalize::NormOp],
+    typosquat: bool,
 ) -> Vec<Row> {
     let mut rows: Vec<Row> = lines
-        .filter_map(|raw| score_candidate(string, &raw, metric, threshold, cmap))
+        .filter_map(|raw| score_candidate(string, &raw, metric, threshold, cmap, ops, typosquat))
         .collect();
     if sort || top.is_some() {
         rows = sort_and_truncate(rows, metric, top);
@@ -228,10 +266,61 @@ fn process_list<I: Iterator<Item = String>>(
     rows
 }
 
-/// Batch-mode success: with a threshold, requires at least one match; without,
-/// always succeeds.
-fn batch_matched_ok(threshold: Option<f64>, matched: bool) -> bool {
-    threshold.is_none() || matched
+/// Batch-mode success: `--typosquat` or `-t` requires at least one match;
+/// otherwise always succeeds.
+fn batch_matched_ok(threshold: Option<f64>, typosquat: bool, matched: bool) -> bool {
+    if typosquat || threshold.is_some() {
+        matched
+    } else {
+        true
+    }
+}
+
+/// Reconstruct scored lengths / identity-gate flags from a kept row.
+fn class_from_row(row: &Row, ops_on: bool) -> (TyposquatClass, String) {
+    let identical = row.a == row.b;
+    let same_project = ops_on && !identical && row.a_norm.as_deref() == row.b_norm.as_deref();
+    let (sa, sb): (&str, &str) = if ops_on && !identical && !same_project {
+        (
+            row.a_norm.as_deref().unwrap(),
+            row.b_norm.as_deref().unwrap(),
+        )
+    } else {
+        (row.a.as_str(), row.b.as_str())
+    };
+    classify_typosquat(
+        identical,
+        same_project,
+        &row.panel,
+        sa.chars().count(),
+        sb.chars().count(),
+    )
+}
+
+/// JSONL line for a batch/list row. Norms when ops ran; class when `--typosquat`.
+fn emit_row_json(
+    row: &Row,
+    keys: (&str, &str),
+    fields: Option<&[&'static str]>,
+    ops: &[normalize::NormOp],
+    typosquat: bool,
+) -> String {
+    let norms = if !ops.is_empty() {
+        match (row.a_norm.as_deref(), row.b_norm.as_deref()) {
+            (Some(x), Some(y)) => Some((x, y)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let class_owned: Option<(&'static str, String)> = if typosquat {
+        let (c, reason) = class_from_row(row, !ops.is_empty());
+        Some((c.json_key(), reason))
+    } else {
+        None
+    };
+    let class = class_owned.as_ref().map(|(k, r)| (*k, r.as_str()));
+    result_json(&row.a, &row.b, &row.panel, keys, fields, norms, class)
 }
 
 #[derive(Debug, PartialEq)]
@@ -494,46 +583,50 @@ fn main() -> ExitCode {
                 opts.sort,
                 opts.top,
                 &cmap,
+                &ops,
+                opts.typosquat,
             );
             matched = !rows.is_empty();
-            for (a, b, panel) in &rows {
+            for row in &rows {
                 let _ = writeln!(
                     out,
                     "{}",
-                    result_json(
-                        a,
-                        b,
-                        panel,
+                    emit_row_json(
+                        row,
                         ("input", "match"),
                         opts.fields.as_deref(),
-                        None,
-                        None,
+                        &ops,
+                        opts.typosquat,
                     )
                 );
             }
         } else {
             for raw in lines {
-                if let Some((a, b, panel)) =
-                    score_candidate(string, &raw, opts.metric, opts.threshold, &cmap)
-                {
+                if let Some(row) = score_candidate(
+                    string,
+                    &raw,
+                    opts.metric,
+                    opts.threshold,
+                    &cmap,
+                    &ops,
+                    opts.typosquat,
+                ) {
                     matched = true;
                     let _ = writeln!(
                         out,
                         "{}",
-                        result_json(
-                            &a,
-                            &b,
-                            &panel,
+                        emit_row_json(
+                            &row,
                             ("input", "match"),
                             opts.fields.as_deref(),
-                            None,
-                            None,
+                            &ops,
+                            opts.typosquat,
                         )
                     );
                 }
             }
         }
-        return if batch_matched_ok(opts.threshold, matched) {
+        return if batch_matched_ok(opts.threshold, opts.typosquat, matched) {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -562,28 +655,23 @@ fn main() -> ExitCode {
                     continue;
                 }
             };
-            let panel = score_pair(la, lb, &cmap);
-            if let Some(t) = opts.threshold {
-                if row_metric(&panel, opts.metric) > t {
-                    continue;
-                }
+            let s = prepare_pair(la, lb, &ops, &cmap);
+            if let Some(row) = keep_scored(s, opts.metric, opts.threshold, opts.typosquat) {
+                matched = true;
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    emit_row_json(
+                        &row,
+                        ("a", "b"),
+                        opts.fields.as_deref(),
+                        &ops,
+                        opts.typosquat,
+                    )
+                );
             }
-            matched = true;
-            let _ = writeln!(
-                out,
-                "{}",
-                result_json(
-                    la,
-                    lb,
-                    &panel,
-                    ("a", "b"),
-                    opts.fields.as_deref(),
-                    None,
-                    None,
-                )
-            );
         }
-        return if batch_matched_ok(opts.threshold, matched) {
+        return if batch_matched_ok(opts.threshold, opts.typosquat, matched) {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -652,6 +740,16 @@ mod tests {
         confusables::ConfusableMap::uts39()
     }
 
+    fn test_row(a: &str, b: &str) -> Row {
+        Row {
+            a: a.to_string(),
+            b: b.to_string(),
+            a_norm: None,
+            b_norm: None,
+            panel: score_pair(a, b, &cmap()),
+        }
+    }
+
     #[test]
     fn result_json_uses_given_keys_and_all_axes() {
         let panel = score_pair("paypal", "p\u{0430}ypal", &cmap());
@@ -708,70 +806,36 @@ mod tests {
     #[test]
     fn sort_and_truncate_orders_and_caps() {
         let rows = vec![
-            (
-                "abc".to_string(),
-                "abXYZ".to_string(),
-                score_pair("abc", "abXYZ", &cmap()),
-            ),
-            (
-                "abc".to_string(),
-                "abc".to_string(),
-                score_pair("abc", "abc", &cmap()),
-            ),
-            (
-                "abc".to_string(),
-                "abd".to_string(),
-                score_pair("abc", "abd", &cmap()),
-            ),
+            test_row("abc", "abXYZ"),
+            test_row("abc", "abc"),
+            test_row("abc", "abd"),
         ];
         let sorted = sort_and_truncate(rows, "skeleton_damerau", None);
-        assert_eq!(sorted[0].1, "abc"); // identical -> 0 first
+        assert_eq!(sorted[0].b, "abc"); // identical -> 0 first
         assert!(
-            row_metric(&sorted[0].2, "skeleton_damerau")
-                <= row_metric(&sorted[1].2, "skeleton_damerau")
+            row_metric(&sorted[0].panel, "skeleton_damerau")
+                <= row_metric(&sorted[1].panel, "skeleton_damerau")
         );
         assert!(
-            row_metric(&sorted[1].2, "skeleton_damerau")
-                <= row_metric(&sorted[2].2, "skeleton_damerau")
+            row_metric(&sorted[1].panel, "skeleton_damerau")
+                <= row_metric(&sorted[2].panel, "skeleton_damerau")
         );
 
-        let rows2 = vec![
-            (
-                "abc".to_string(),
-                "abd".to_string(),
-                score_pair("abc", "abd", &cmap()),
-            ),
-            (
-                "abc".to_string(),
-                "abc".to_string(),
-                score_pair("abc", "abc", &cmap()),
-            ),
-        ];
+        let rows2 = vec![test_row("abc", "abd"), test_row("abc", "abc")];
         let top1 = sort_and_truncate(rows2, "skeleton_damerau", Some(1));
         assert_eq!(top1.len(), 1);
-        assert_eq!(top1[0].1, "abc");
+        assert_eq!(top1[0].b, "abc");
     }
 
     #[test]
     fn sort_is_stable_on_ties() {
-        let rows = vec![
-            (
-                "x".to_string(),
-                "first".to_string(),
-                score_pair("x", "first", &cmap()),
-            ),
-            (
-                "x".to_string(),
-                "secnd".to_string(),
-                score_pair("x", "secnd", &cmap()),
-            ),
-        ];
-        let a = row_metric(&rows[0].2, "skeleton_damerau");
-        let b = row_metric(&rows[1].2, "skeleton_damerau");
+        let rows = vec![test_row("x", "first"), test_row("x", "secnd")];
+        let a = row_metric(&rows[0].panel, "skeleton_damerau");
+        let b = row_metric(&rows[1].panel, "skeleton_damerau");
         assert!((a - b).abs() < 1e-9, "precondition: scores must tie");
         let sorted = sort_and_truncate(rows, "skeleton_damerau", None);
-        assert_eq!(sorted[0].1, "first");
-        assert_eq!(sorted[1].1, "secnd");
+        assert_eq!(sorted[0].b, "first");
+        assert_eq!(sorted[1].b, "secnd");
     }
 
     #[test]
@@ -789,10 +853,12 @@ mod tests {
             true,
             Some(2),
             &cmap(),
+            &[],
+            false,
         );
         assert_eq!(out.len(), 2);
-        assert!(row_metric(&out[0].2, "skeleton_damerau").abs() < 1e-9);
-        assert!(row_metric(&out[1].2, "skeleton_damerau").abs() < 1e-9);
+        assert!(row_metric(&out[0].panel, "skeleton_damerau").abs() < 1e-9);
+        assert!(row_metric(&out[1].panel, "skeleton_damerau").abs() < 1e-9);
 
         let out2 = process_list(
             "paypal",
@@ -802,6 +868,8 @@ mod tests {
             false,
             None,
             &cmap(),
+            &[],
+            false,
         );
         assert_eq!(out2.len(), 2);
 
@@ -813,14 +881,27 @@ mod tests {
             false,
             None,
             &cmap(),
+            &[],
+            false,
         );
         assert_eq!(out3.len(), 1);
     }
 
     #[test]
     fn score_candidate_trims_skips_and_thresholds() {
-        assert!(score_candidate("paypal", "", "skeleton_damerau", None, &cmap()).is_none());
-        assert!(score_candidate("paypal", "   ", "skeleton_damerau", None, &cmap()).is_none());
+        assert!(
+            score_candidate("paypal", "", "skeleton_damerau", None, &cmap(), &[], false).is_none()
+        );
+        assert!(score_candidate(
+            "paypal",
+            "   ",
+            "skeleton_damerau",
+            None,
+            &cmap(),
+            &[],
+            false
+        )
+        .is_none());
 
         let r = score_candidate(
             "paypal",
@@ -828,31 +909,98 @@ mod tests {
             "skeleton_damerau",
             None,
             &cmap(),
+            &[],
+            false,
         )
         .expect("should score");
-        assert_eq!(r.0, "paypal");
-        assert_eq!(r.1, "p\u{0430}ypal");
-        assert_eq!(r.2.get("confusable_only"), Some(AxisValue::Bool(true)));
+        assert_eq!(r.a, "paypal");
+        assert_eq!(r.b, "p\u{0430}ypal");
+        assert_eq!(r.panel.get("confusable_only"), Some(AxisValue::Bool(true)));
 
-        assert!(
-            score_candidate("paypal", "zzzzzz", "skeleton_damerau", Some(0.0), &cmap()).is_none()
-        );
+        assert!(score_candidate(
+            "paypal",
+            "zzzzzz",
+            "skeleton_damerau",
+            Some(0.0),
+            &cmap(),
+            &[],
+            false
+        )
+        .is_none());
         assert!(score_candidate(
             "paypal",
             "p\u{0430}ypal",
             "skeleton_damerau",
             Some(0.0),
-            &cmap()
+            &cmap(),
+            &[],
+            false
         )
         .is_some());
     }
 
     #[test]
     fn batch_exit_codes() {
-        assert!(batch_matched_ok(None, false));
-        assert!(batch_matched_ok(None, true));
-        assert!(batch_matched_ok(Some(0.5), true));
-        assert!(!batch_matched_ok(Some(0.5), false));
+        assert!(batch_matched_ok(None, false, false));
+        assert!(batch_matched_ok(None, false, true));
+        assert!(batch_matched_ok(Some(0.5), false, true));
+        assert!(!batch_matched_ok(Some(0.5), false, false));
+    }
+
+    #[test]
+    fn score_candidate_typosquat_keeps_lodahs() {
+        let row = score_candidate("lodash", "lodahs", "damerau", None, &cmap(), &[], true);
+        assert!(row.is_some());
+    }
+
+    #[test]
+    fn score_candidate_typosquat_drops_unrelated() {
+        let row = score_candidate(
+            "lodash",
+            "lodash-utils",
+            "damerau",
+            None,
+            &cmap(),
+            &[],
+            true,
+        );
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn score_candidate_typosquat_pypi_drops_same_project() {
+        let row = score_candidate(
+            "foo_bar",
+            "foo-bar",
+            "damerau",
+            None,
+            &cmap(),
+            &normalize::pypi_ops(),
+            true,
+        );
+        assert!(row.is_none());
+    }
+
+    #[test]
+    fn score_candidate_pypi_without_typosquat_keeps_same_project() {
+        let row = score_candidate(
+            "foo_bar",
+            "foo-bar",
+            "skeleton_damerau",
+            None,
+            &cmap(),
+            &normalize::pypi_ops(),
+            false,
+        );
+        assert!(row.is_some());
+    }
+
+    #[test]
+    fn batch_ok_typosquat_requires_match() {
+        assert!(!batch_matched_ok(None, true, false));
+        assert!(batch_matched_ok(None, true, true));
+        assert!(batch_matched_ok(None, false, false));
+        assert!(!batch_matched_ok(Some(1.0), false, false));
     }
 
     #[test]
