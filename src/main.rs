@@ -20,7 +20,7 @@ use axes::{
 };
 use std::env;
 use std::process::ExitCode;
-use verdict::verdict;
+use verdict::{classify_typosquat, verdict};
 
 /// A scored row carried through batch/list modes: the two strings + the panel.
 type Row = (String, String, Panel);
@@ -28,6 +28,61 @@ type Row = (String, String, Panel);
 /// Compute the panel for a pair.
 fn score_pair(a: &str, b: &str, cmap: &confusables::ConfusableMap) -> Panel {
     build_panel(&PairContext::new(a, b, cmap))
+}
+
+struct PairScore {
+    a: String,
+    b: String,
+    a_norm: Option<String>,
+    b_norm: Option<String>,
+    panel: Panel,
+    scored_a: String,
+    scored_b: String,
+    identical: bool,
+    same_project: bool,
+}
+
+fn build_ops(steps: &[NormStep]) -> Result<Vec<normalize::NormOp>, String> {
+    let mut ops = Vec::new();
+    for step in steps {
+        match step {
+            NormStep::Pypi => ops.extend(normalize::pypi_ops()),
+            NormStep::File(path) => ops.extend(normalize::load_ops_file(path)?),
+        }
+    }
+    Ok(ops)
+}
+
+fn prepare_pair(
+    a: &str,
+    b: &str,
+    ops: &[normalize::NormOp],
+    cmap: &confusables::ConfusableMap,
+) -> PairScore {
+    let on = !ops.is_empty();
+    let a_norm = on.then(|| normalize::apply_ops(a, ops));
+    let b_norm = on.then(|| normalize::apply_ops(b, ops));
+    let identical = a == b;
+    let same_project = on && !identical && a_norm.as_deref() == b_norm.as_deref();
+    let (sa, sb): (&str, &str) = if on && !identical && !same_project {
+        (a_norm.as_deref().unwrap(), b_norm.as_deref().unwrap())
+    } else {
+        (a, b)
+    };
+    let panel = score_pair(sa, sb, cmap);
+    let scored_a = sa.to_string();
+    let scored_b = sb.to_string();
+    PairScore {
+        a: a.to_string(),
+        b: b.to_string(),
+        a_norm,
+        b_norm,
+        panel,
+        scored_a,
+        scored_b,
+        identical,
+        same_project,
+    }
 }
 
 /// The selected axis keys to emit, in canonical order: all when None.
@@ -45,36 +100,70 @@ fn result_json(
     panel: &Panel,
     keys: (&str, &str),
     fields: Option<&[&'static str]>,
+    norms: Option<(&str, &str)>,
+    class: Option<(&str, &str)>, // (json_key, reason)
 ) -> String {
     let mut out = format!("{{\"{}\":{:?},\"{}\":{:?}", keys.0, a, keys.1, b);
+    if let Some((na, nb)) = norms {
+        out.push_str(&format!(
+            ",\"{}_normalized\":{:?},\"{}_normalized\":{:?}",
+            keys.0, na, keys.1, nb
+        ));
+    }
     for k in selected_keys(fields) {
         if let Some(v) = panel.get(k) {
             out.push_str(&format!(",\"{}\":{}", k, v.to_json()));
         }
     }
+    if let Some((ck, reason)) = class {
+        out.push_str(&format!(
+            ",\"classification\":\"{ck}\",\"reason\":{reason:?}"
+        ));
+    }
     out.push('}');
     out
 }
 
-/// Human single-pair output: one padded row per selected axis, then a blank
-/// line, then the verdict.
+/// Human single-pair output: optional normalized line, one padded row per
+/// selected axis, then a blank line and the verdict / classification.
 fn emit_human(
-    a: &str,
-    b: &str,
-    panel: &Panel,
+    scored: &PairScore,
     fields: Option<&[&'static str]>,
     len_tolerance: f64,
+    typosquat: bool,
+    ops_on: bool,
 ) {
+    if ops_on {
+        if let (Some(na), Some(nb)) = (scored.a_norm.as_deref(), scored.b_norm.as_deref()) {
+            if na != scored.a || nb != scored.b {
+                println!("{: <24} {na} / {nb}", "normalized");
+            }
+        }
+    }
     for k in selected_keys(fields) {
-        if let Some(v) = panel.get(k) {
-            // Longest key is uts39_confusable_count (22); pad to 24.
+        if let Some(v) = scored.panel.get(k) {
             println!("{k:<24} {}", v.to_human());
         }
     }
-    let la = a.chars().count();
-    let lb = b.chars().count();
-    let (cat, msg) = verdict(panel, la, lb, len_tolerance);
-    println!("\n[{}] {}", cat.tag(), msg);
+    if typosquat {
+        let (cat, msg) = classify_typosquat(
+            scored.identical,
+            scored.same_project,
+            &scored.panel,
+            scored.scored_a.chars().count(),
+            scored.scored_b.chars().count(),
+        );
+        println!("\n[{}] {msg}", cat.tag());
+    } else if scored.same_project {
+        println!(
+            "\n[SAME PROJECT] The names differ only by registry normalization (same project)."
+        );
+    } else {
+        let la = scored.a.chars().count();
+        let lb = scored.b.chars().count();
+        let (cat, msg) = verdict(&scored.panel, la, lb, len_tolerance);
+        println!("\n[{}] {msg}", cat.tag());
+    }
 }
 
 /// The metric distance of a row, or +inf if the metric key is missing/non-numeric
@@ -374,6 +463,15 @@ fn main() -> ExitCode {
         confusables::ConfusableMap::from_sources(&opts.sources)
     };
 
+    let ops = match build_ops(&opts.norm_steps) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("error: {e}\n");
+            print_usage();
+            return ExitCode::from(2);
+        }
+    };
+
     // List mode: score --string against each line of --list, emit input/match JSONL.
     if let (Some(string), Some(path)) = (opts.string.as_ref(), opts.list.as_ref()) {
         let file = match std::fs::File::open(path) {
@@ -402,7 +500,15 @@ fn main() -> ExitCode {
                 let _ = writeln!(
                     out,
                     "{}",
-                    result_json(a, b, panel, ("input", "match"), opts.fields.as_deref())
+                    result_json(
+                        a,
+                        b,
+                        panel,
+                        ("input", "match"),
+                        opts.fields.as_deref(),
+                        None,
+                        None,
+                    )
                 );
             }
         } else {
@@ -414,7 +520,15 @@ fn main() -> ExitCode {
                     let _ = writeln!(
                         out,
                         "{}",
-                        result_json(&a, &b, &panel, ("input", "match"), opts.fields.as_deref())
+                        result_json(
+                            &a,
+                            &b,
+                            &panel,
+                            ("input", "match"),
+                            opts.fields.as_deref(),
+                            None,
+                            None,
+                        )
                     );
                 }
             }
@@ -458,7 +572,15 @@ fn main() -> ExitCode {
             let _ = writeln!(
                 out,
                 "{}",
-                result_json(la, lb, &panel, ("a", "b"), opts.fields.as_deref())
+                result_json(
+                    la,
+                    lb,
+                    &panel,
+                    ("a", "b"),
+                    opts.fields.as_deref(),
+                    None,
+                    None,
+                )
             );
         }
         return if batch_matched_ok(opts.threshold, matched) {
@@ -471,17 +593,48 @@ fn main() -> ExitCode {
     // Single-pair mode.
     let a = &opts.positionals[0];
     let b = &opts.positionals[1];
-    let panel = score_pair(a, b, &cmap);
+    let scored = prepare_pair(a, b, &ops, &cmap);
+    let norms = match (scored.a_norm.as_deref(), scored.b_norm.as_deref()) {
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => None,
+    };
+    let class_owned: Option<(&'static str, String)> = if opts.typosquat {
+        let (c, reason) = classify_typosquat(
+            scored.identical,
+            scored.same_project,
+            &scored.panel,
+            scored.scored_a.chars().count(),
+            scored.scored_b.chars().count(),
+        );
+        Some((c.json_key(), reason))
+    } else {
+        None
+    };
+    let class = class_owned.as_ref().map(|(k, r)| (*k, r.as_str()));
     if opts.json {
         println!(
             "{}",
-            result_json(a, b, &panel, ("a", "b"), opts.fields.as_deref())
+            result_json(
+                &scored.a,
+                &scored.b,
+                &scored.panel,
+                ("a", "b"),
+                opts.fields.as_deref(),
+                norms,
+                class,
+            )
         );
     } else {
-        emit_human(a, b, &panel, opts.fields.as_deref(), opts.len_tolerance);
+        emit_human(
+            &scored,
+            opts.fields.as_deref(),
+            opts.len_tolerance,
+            opts.typosquat,
+            !ops.is_empty(),
+        );
     }
     if let Some(t) = opts.threshold {
-        return if row_metric(&panel, opts.metric) <= t {
+        return if row_metric(&scored.panel, opts.metric) <= t {
             ExitCode::SUCCESS
         } else {
             ExitCode::FAILURE
@@ -502,7 +655,15 @@ mod tests {
     #[test]
     fn result_json_uses_given_keys_and_all_axes() {
         let panel = score_pair("paypal", "p\u{0430}ypal", &cmap());
-        let line = result_json("paypal", "p\u{0430}ypal", &panel, ("a", "b"), None);
+        let line = result_json(
+            "paypal",
+            "p\u{0430}ypal",
+            &panel,
+            ("a", "b"),
+            None,
+            None,
+            None,
+        );
         assert!(line.starts_with("{\"a\":\"paypal\""));
         assert!(line.contains("\"damerau\":"));
         assert!(line.contains("\"skeleton_damerau\":"));
@@ -512,7 +673,15 @@ mod tests {
         assert!(!line.contains("homoglyph_damerau"));
         assert!(!line.contains("normalized"));
 
-        let line2 = result_json("paypal", "p\u{0430}ypal", &panel, ("input", "match"), None);
+        let line2 = result_json(
+            "paypal",
+            "p\u{0430}ypal",
+            &panel,
+            ("input", "match"),
+            None,
+            None,
+            None,
+        );
         assert!(line2.starts_with("{\"input\":\"paypal\",\"match\":"));
     }
 
@@ -520,7 +689,15 @@ mod tests {
     fn result_json_respects_field_filter() {
         let panel = score_pair("GOOGLE", "GO0GLE", &cmap());
         let only = parse_fields("damerau,confusable_only").unwrap();
-        let line = result_json("GOOGLE", "GO0GLE", &panel, ("a", "b"), Some(&only));
+        let line = result_json(
+            "GOOGLE",
+            "GO0GLE",
+            &panel,
+            ("a", "b"),
+            Some(&only),
+            None,
+            None,
+        );
         assert!(line.starts_with("{\"a\":\"GOOGLE\",\"b\":\"GO0GLE\""));
         assert!(line.contains("\"damerau\":"));
         assert!(line.contains("\"confusable_only\":"));
@@ -1007,5 +1184,87 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(o.fields.as_deref(), Some(&["damerau"][..]));
+    }
+
+    #[test]
+    fn result_json_pypi_adds_normalized_keys() {
+        let panel = score_pair("foo-bar", "foo-bar", &cmap());
+        let line = result_json(
+            "foo_bar",
+            "foo-bar",
+            &panel,
+            ("a", "b"),
+            None,
+            Some(("foo-bar", "foo-bar")),
+            None,
+        );
+        assert!(
+            line.contains("\"a_normalized\":\"foo-bar\"") || line.contains("\"a_normalized\":")
+        );
+        assert!(line.contains("a_normalized"));
+        assert!(line.contains("b_normalized"));
+        assert!(!line.contains("\"classification\""));
+    }
+
+    #[test]
+    fn result_json_typosquat_adds_classification_after_axes() {
+        let panel = score_pair("lodash", "lodahs", &cmap());
+        let fields =
+            parse_fields("equal,damerau,skeleton_damerau,confusable_only,keyboard_distance")
+                .unwrap();
+        let line = result_json(
+            "lodash",
+            "lodahs",
+            &panel,
+            ("a", "b"),
+            Some(&fields),
+            None,
+            Some(("likely_typosquat", "1 Damerau edit.")),
+        );
+        assert!(line.contains("\"classification\":\"likely_typosquat\""));
+        assert!(line.contains("\"reason\":"));
+        assert!(!line.contains("\"levenshtein\":"));
+        let class_at = line.find("\"classification\"").unwrap();
+        let dam_at = line.find("\"damerau\"").unwrap();
+        assert!(dam_at < class_at, "classification after axes");
+    }
+
+    #[test]
+    fn result_json_list_normalized_key_names() {
+        let panel = score_pair("a", "a", &cmap());
+        let line = result_json(
+            "A",
+            "a",
+            &panel,
+            ("input", "match"),
+            None,
+            Some(("a", "a")),
+            None,
+        );
+        assert!(line.contains("input_normalized"));
+        assert!(line.contains("match_normalized"));
+    }
+
+    #[test]
+    fn prepare_pair_same_project_scores_originals() {
+        let ops = normalize::pypi_ops();
+        let s = prepare_pair("foo_bar", "foo-bar", &ops, &cmap());
+        assert!(s.same_project);
+        assert!(!s.identical);
+        assert_eq!(s.a, "foo_bar");
+        assert_eq!(s.a_norm.as_deref(), Some("foo-bar"));
+        // Panel on originals → damerau 1, equal false
+        assert_eq!(s.panel.get("equal"), Some(axes::AxisValue::Bool(false)));
+        assert_eq!(s.panel.get("damerau"), Some(axes::AxisValue::Int(1)));
+    }
+
+    #[test]
+    fn prepare_pair_django_case_scores_normalized() {
+        let ops = normalize::pypi_ops();
+        let s = prepare_pair("Django", "djangoo", &ops, &cmap());
+        assert!(!s.same_project);
+        assert_eq!(s.scored_a, "django");
+        assert_eq!(s.scored_b, "djangoo");
+        assert_eq!(s.panel.get("damerau"), Some(axes::AxisValue::Int(1)));
     }
 }

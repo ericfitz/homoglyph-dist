@@ -95,7 +95,6 @@ pub fn verdict(panel: &Panel, len_a: usize, len_b: usize, len_tolerance: f64) ->
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[allow(dead_code)] // wired by --typosquat profile (later task)
 pub enum TyposquatClass {
     Identical,
     SameProject,
@@ -104,7 +103,6 @@ pub enum TyposquatClass {
 }
 
 impl TyposquatClass {
-    #[allow(dead_code)] // wired by --typosquat profile (later task)
     pub fn tag(self) -> &'static str {
         match self {
             TyposquatClass::Identical => "IDENTICAL",
@@ -113,7 +111,6 @@ impl TyposquatClass {
             TyposquatClass::Unrelated => "UNRELATED",
         }
     }
-    #[allow(dead_code)] // wired by --typosquat profile (later task)
     pub fn json_key(self) -> &'static str {
         match self {
             TyposquatClass::Identical => "identical",
@@ -124,7 +121,6 @@ impl TyposquatClass {
     }
 }
 
-#[allow(dead_code)] // wired by --typosquat profile (later task)
 pub fn classify_typosquat(
     originals_equal: bool,
     same_project: bool,

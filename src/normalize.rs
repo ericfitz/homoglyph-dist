@@ -1,19 +1,16 @@
 //! String normalizer: ordered ops for registry name identity (PEP 503 etc.).
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // TODO(task-5): remove once used by prepare_pair
 pub enum NormOp {
     Lower,
     Map { charset: String, repl: String },
     Collapse { charset: String },
 }
 
-#[allow(dead_code)] // TODO(task-5): remove once apply_ops is wired
 fn charset_has(charset: &str, c: char) -> bool {
     charset.chars().any(|x| x == c)
 }
 
-#[allow(dead_code)] // TODO(task-5): remove once used by prepare_pair
 pub fn apply_ops(s: &str, ops: &[NormOp]) -> String {
     let mut cur = s.to_string();
     for op in ops {
@@ -52,7 +49,6 @@ pub fn apply_ops(s: &str, ops: &[NormOp]) -> String {
     cur
 }
 
-#[allow(dead_code)] // TODO(task-5): remove once used by prepare_pair / --pypi
 pub fn pypi_ops() -> Vec<NormOp> {
     vec![
         NormOp::Lower,
@@ -66,7 +62,6 @@ pub fn pypi_ops() -> Vec<NormOp> {
     ]
 }
 
-#[allow(dead_code)] // TODO(task-5): remove once used by --normalize
 pub fn parse_ops(json: &str) -> Result<Vec<NormOp>, String> {
     let mut p = Parser::new(json);
     p.skip_ws();
@@ -81,7 +76,6 @@ pub fn parse_ops(json: &str) -> Result<Vec<NormOp>, String> {
     ops.into_iter().map(op_from_json).collect()
 }
 
-#[allow(dead_code)] // TODO(task-5): remove once used by --normalize
 pub fn load_ops_file(path: &str) -> Result<Vec<NormOp>, String> {
     let meta = std::fs::metadata(path)
         .map_err(|e| format!("cannot read --normalize file {path:?}: {e}"))?;
