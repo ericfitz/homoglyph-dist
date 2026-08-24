@@ -46,7 +46,7 @@ To check your installed version:
 
 ```sh
 sqdist --version
-# sqdist 0.3.0 (d430de5)
+# sqdist 0.4.0 (<sha>)
 ```
 
 ## Axes
@@ -106,6 +106,14 @@ OPTIONS:
         --fields <LIST>     Comma-separated axes to show (default: all). See AXES.
         --confusables <LIST> Confusable sources for skeletons: uts39,flowcrypt,digraph (default uts39)
         --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)
+    --typosquat             Package-typosquat profile: five axes, four-way
+                            classification, batch emits likely_typosquat only.
+                            Default metric damerau. Cannot combine with -t.
+    --pypi                  PEP 503 normalize (lower, map ._- → -, collapse -).
+                            Identity-gate same-project names; otherwise score
+                            normalized strings. Originals stay identifier keys.
+-n, --normalize <PATH>      Append normalize ops from a JSON file (ordered
+                            array of [op, ...]). Repeatable. Not a preset name.
     -s, --stdin             Batch: read TAB/comma pairs from stdin, emit JSONL
         --string <S>        (with --list) the single string to compare
         --list <FILE>       (with --string) score <S> against each non-blank line
@@ -188,6 +196,48 @@ alerts on only a handful stays near the ~2 MB baseline. So: stream by default;
 add `-t` (and optionally `--top`) when you want a ranked view of a very large
 list without holding it all in memory. (Chunking a huge list and scanning each
 piece is also fine — results are independent per line.)
+
+## Typosquat profile (package registries)
+
+`--typosquat` emits five axes (`equal`, `damerau`, `skeleton_damerau`,
+`confusable_only`, `keyboard_distance`), classifies each pair as
+`identical` / `same_project` / `likely_typosquat` / `unrelated`, and in
+batch/list mode prints **only** `likely_typosquat` rows (exit 1 if none).
+It cannot be combined with `-t`. Default `--metric` becomes `damerau`.
+
+`--pypi` applies PEP 503 (lowercase; map `._-` → `-`; collapse `-`). Names
+that differ only by that rule are `same_project`, not squats. Otherwise
+distances are on the normalized strings; JSON keeps the original identifiers
+and adds `a_normalized` / `b_normalized` (or `input_normalized` /
+`match_normalized`).
+
+`--normalize` / `-n` is a **JSON file path**, not a preset name.
+`--normalize pypi` reads a file named `pypi`. Repeatable; `--pypi` and `-n`
+compose in argv order.
+
+```sh
+sqdist --typosquat lodash lodahs
+sqdist --typosquat --string lodash --list new-packages.txt
+sqdist --typosquat --pypi requests_toolbelt requests-toolbelt
+sqdist --typosquat --pypi --string django --list new-pypi.txt
+sqdist --typosquat -n ./rules.json --string foo --list names.txt
+```
+
+Rules file:
+
+```json
+[["lower"], ["map", "._-", "-"], ["collapse", "-"]]
+```
+
+### Example: `--typosquat -j`
+
+```sh
+sqdist --typosquat -j lodash lodahs
+```
+
+```json
+{"a":"lodash","b":"lodahs","equal":false,"damerau":1,"skeleton_damerau":1,"confusable_only":false,"keyboard_distance":0.0000,"classification":"likely_typosquat","reason":"1 Damerau edit. Keyboard distance 0 (no far-key substitutions)."}
+```
 
 ## Output axes
 
@@ -367,7 +417,7 @@ licensed under the MIT License. The embedded data is pinned to commit `f27b783`
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # unit tests in each module's #[cfg(test)] block; currently 88 tests
+cargo test               # unit tests in each module's #[cfg(test)] block; currently 131 tests
 ```
 
 The confusables table is embedded at compile time (`src/confusables_data.rs`,
@@ -381,7 +431,7 @@ access** are needed for confusables. sqdist has one compiled dependency:
 per embedded confusable source (regardless of `--confusables`):
 
 ```
-sqdist 0.3.0 (<sha>)
+sqdist 0.4.0 (<sha>)
   data: UTS#39 confusables.txt v17.0.0 (2025-07-22)
   data: FlowCrypt idn-homographs-database @ f27b783 (retrieved 2021-05-26)
 ```

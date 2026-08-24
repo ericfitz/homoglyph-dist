@@ -1,6 +1,6 @@
 [package]
 name = "sqdist"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Fast string-distance CLI for typosquatting and homoglyph detection (Levenshtein, Damerau-Levenshtein, UTS#39 confusable-weighted)."
 license = "MIT OR Apache-2.0"
