@@ -156,8 +156,8 @@ fn emit_human(
             scored.identical,
             scored.same_project,
             &scored.panel,
-            scored.scored_a.chars().count(),
-            scored.scored_b.chars().count(),
+            &scored.scored_a,
+            &scored.scored_b,
         );
         println!("\n[{}] {msg}", cat.tag());
     } else if scored.same_project {
@@ -200,10 +200,13 @@ fn keep_scored(s: PairScore, metric: &str, threshold: Option<f64>, typosquat: bo
             s.identical,
             s.same_project,
             &s.panel,
-            s.scored_a.chars().count(),
-            s.scored_b.chars().count(),
+            &s.scored_a,
+            &s.scored_b,
         );
-        if cat != TyposquatClass::LikelyTyposquat {
+        if !matches!(
+            cat,
+            TyposquatClass::LikelyTyposquat | TyposquatClass::PossibleCombosquat
+        ) {
             return None;
         }
     } else if let Some(t) = threshold {
@@ -288,13 +291,7 @@ fn class_from_row(row: &Row, ops_on: bool) -> (TyposquatClass, String) {
     } else {
         (row.a.as_str(), row.b.as_str())
     };
-    classify_typosquat(
-        identical,
-        same_project,
-        &row.panel,
-        sa.chars().count(),
-        sb.chars().count(),
-    )
+    classify_typosquat(identical, same_project, &row.panel, sa, sb)
 }
 
 /// JSONL line for a batch/list row. Norms when ops ran; class when `--typosquat`.
@@ -362,8 +359,8 @@ fn print_usage() {
          \x20       --fields <LIST>     Comma-separated axes to show (default: all). See AXES.\n\
          \x20       --confusables <LIST> Confusable sources for skeletons: uts39,flowcrypt,digraph (default uts39)\n\
          \x20       --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)\n\
-         \x20   --typosquat             Package-typosquat profile: five axes, four-way\n\
-         \x20                           classification, batch emits likely_typosquat only.\n\
+         \x20   --typosquat             Package-typosquat profile: five axes, classification\n\
+         \x20                           (incl. possible_combosquat). Batch emits alerts only.\n\
          \x20                           Default metric damerau. Cannot combine with -t.\n\
          \x20   --pypi                  PEP 503 normalize (lower, map ._- → -, collapse -).\n\
          \x20                           Identity-gate same-project names; otherwise score\n\
@@ -691,8 +688,8 @@ fn main() -> ExitCode {
             scored.identical,
             scored.same_project,
             &scored.panel,
-            scored.scored_a.chars().count(),
-            scored.scored_b.chars().count(),
+            &scored.scored_a,
+            &scored.scored_b,
         );
         Some((c.json_key(), reason))
     } else {
@@ -954,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn score_candidate_typosquat_drops_unrelated() {
+    fn score_candidate_typosquat_keeps_combosquat() {
         let row = score_candidate(
             "lodash",
             "lodash-utils",
@@ -964,6 +961,12 @@ mod tests {
             &[],
             true,
         );
+        assert!(row.is_some());
+    }
+
+    #[test]
+    fn score_candidate_typosquat_drops_unrelated() {
+        let row = score_candidate("lodash", "xylophone", "damerau", None, &cmap(), &[], true);
         assert!(row.is_none());
     }
 

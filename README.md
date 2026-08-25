@@ -106,8 +106,8 @@ OPTIONS:
         --fields <LIST>     Comma-separated axes to show (default: all). See AXES.
         --confusables <LIST> Confusable sources for skeletons: uts39,flowcrypt,digraph (default uts39)
         --len-tolerance <F> Max length-difference ratio for a spoof verdict (default 0.25)
-    --typosquat             Package-typosquat profile: five axes, four-way
-                            classification, batch emits likely_typosquat only.
+    --typosquat             Package-typosquat profile: five axes, classification
+                            (incl. possible_combosquat). Batch emits alerts only.
                             Default metric damerau. Cannot combine with -t.
     --pypi                  PEP 503 normalize (lower, map ._- → -, collapse -).
                             Identity-gate same-project names; otherwise score
@@ -143,7 +143,7 @@ generate_pairs | sqdist --stdin -t 1 > alerts.jsonl
 ```
 
 With `-t`, batch modes exit with code 0 if at least one alert was emitted and 1 if none matched.
-Without `-t`, batch modes always exit 0 — except `--typosquat`, the other alert-feed path, which exits 1 if zero `likely_typosquat` rows. This makes it easy to use in shell conditionals:
+Without `-t`, batch modes always exit 0 — except `--typosquat`, the other alert-feed path, which exits 1 if zero `likely_typosquat` or `possible_combosquat` rows. This makes it easy to use in shell conditionals:
 
 ```sh
 if generate_pairs | sqdist --stdin -t 1 > alerts.jsonl; then
@@ -201,9 +201,15 @@ piece is also fine — results are independent per line.)
 
 `--typosquat` emits five axes (`equal`, `damerau`, `skeleton_damerau`,
 `confusable_only`, `keyboard_distance`), classifies each pair as
-`identical` / `same_project` / `likely_typosquat` / `unrelated`, and in
-batch/list mode prints **only** `likely_typosquat` rows (exit 1 if none).
-It cannot be combined with `-t`. Default `--metric` becomes `damerau`.
+`identical` / `same_project` / `likely_typosquat` / `possible_combosquat`
+/ `unrelated`, and in batch/list mode prints **only** `likely_typosquat`
+and `possible_combosquat` rows (exit 1 if none). It cannot be combined
+with `-t`. Default `--metric` becomes `damerau`.
+
+A `possible_combosquat` is a delimited affix of the other name (separators
+`-`, `_`, `.`, `/`): `lodash` vs `lodash-utils`, `requests` vs
+`python-requests`. `react` vs `reactive` is **not** a combosquat (no
+delimiter).
 
 `--pypi` applies PEP 503 (lowercase; map `._-` → `-`; collapse `-`). Names
 that differ only by that rule are `same_project`, not squats. Otherwise
@@ -341,7 +347,7 @@ A likely spoof is signaled when:
 - All differing characters are homoglyphs (`confusable_only = true`), **OR**
 - Homoglyphs account for more than half the Damerau distance within a length tolerance (default `--len-tolerance 0.25`)
 
-With `--typosquat`, the tags are `[IDENTICAL]` / `[SAME PROJECT]` / `[LIKELY TYPOSQUAT]` / `[UNRELATED]` instead. The human verdict line still appears only in single-pair human output; under `--typosquat`, `classification` and `reason` are also emitted in JSON (all modes).
+With `--typosquat`, the tags are `[IDENTICAL]` / `[SAME PROJECT]` / `[LIKELY TYPOSQUAT]` / `[POSSIBLE COMBOSQUAT]` / `[UNRELATED]` instead. The human verdict line still appears only in single-pair human output; under `--typosquat`, `classification` and `reason` are also emitted in JSON (all modes).
 
 ## Multi-character homoglyphs
 

@@ -99,6 +99,7 @@ pub enum TyposquatClass {
     Identical,
     SameProject,
     LikelyTyposquat,
+    PossibleCombosquat,
     Unrelated,
 }
 
@@ -108,6 +109,7 @@ impl TyposquatClass {
             TyposquatClass::Identical => "IDENTICAL",
             TyposquatClass::SameProject => "SAME PROJECT",
             TyposquatClass::LikelyTyposquat => "LIKELY TYPOSQUAT",
+            TyposquatClass::PossibleCombosquat => "POSSIBLE COMBOSQUAT",
             TyposquatClass::Unrelated => "UNRELATED",
         }
     }
@@ -116,17 +118,47 @@ impl TyposquatClass {
             TyposquatClass::Identical => "identical",
             TyposquatClass::SameProject => "same_project",
             TyposquatClass::LikelyTyposquat => "likely_typosquat",
+            TyposquatClass::PossibleCombosquat => "possible_combosquat",
             TyposquatClass::Unrelated => "unrelated",
         }
     }
+}
+
+/// True when the shorter scored name (min 3 chars) is a delimited prefix,
+/// suffix, or token of the longer. Separators: `-`, `_`, `.`, `/`.
+/// `react` vs `reactive` is false (no delimiter); `lodash` vs `lodash-utils`
+/// is true.
+fn is_possible_combosquat(a: &str, b: &str) -> bool {
+    let a = a.to_lowercase();
+    let b = b.to_lowercase();
+    if a == b {
+        return false;
+    }
+    let (short, long) = if a.chars().count() <= b.chars().count() {
+        (a.as_str(), b.as_str())
+    } else {
+        (b.as_str(), a.as_str())
+    };
+    if short.chars().count() < 3 {
+        return false;
+    }
+    const SEPS: [char; 4] = ['-', '_', '.', '/'];
+    for sep in SEPS {
+        let prefix = format!("{short}{sep}");
+        let suffix = format!("{sep}{short}");
+        if long.starts_with(&prefix) || long.ends_with(&suffix) {
+            return true;
+        }
+    }
+    long.split(|c| SEPS.contains(&c)).any(|tok| tok == short)
 }
 
 pub fn classify_typosquat(
     originals_equal: bool,
     same_project: bool,
     panel: &Panel,
-    scored_len_a: usize,
-    scored_len_b: usize,
+    scored_a: &str,
+    scored_b: &str,
 ) -> (TyposquatClass, String) {
     if originals_equal {
         return (
@@ -142,7 +174,7 @@ pub fn classify_typosquat(
     }
     let dam = int_axis(panel, "damerau");
     let confusable_only = bool_axis(panel, "confusable_only");
-    let long = scored_len_a.max(scored_len_b);
+    let long = scored_a.chars().count().max(scored_b.chars().count());
     let likely = (confusable_only || dam <= 1) && long >= 3;
     if likely {
         let reason = if confusable_only {
@@ -157,6 +189,12 @@ pub fn classify_typosquat(
             r
         };
         return (TyposquatClass::LikelyTyposquat, reason);
+    }
+    if is_possible_combosquat(scored_a, scored_b) {
+        return (
+            TyposquatClass::PossibleCombosquat,
+            "One name is the other plus a delimited affix (possible combosquat).".into(),
+        );
     }
     (
         TyposquatClass::Unrelated,
@@ -220,9 +258,7 @@ mod tests {
 
     fn class(a: &str, b: &str, same_project: bool) -> TyposquatClass {
         let p = panel(a, b);
-        let scored_a = a.chars().count();
-        let scored_b = b.chars().count();
-        classify_typosquat(a == b, same_project, &p, scored_a, scored_b).0
+        classify_typosquat(a == b, same_project, &p, a, b).0
     }
 
     #[test]
@@ -235,6 +271,14 @@ mod tests {
         assert_eq!(
             TyposquatClass::LikelyTyposquat.json_key(),
             "likely_typosquat"
+        );
+        assert_eq!(
+            TyposquatClass::PossibleCombosquat.tag(),
+            "POSSIBLE COMBOSQUAT"
+        );
+        assert_eq!(
+            TyposquatClass::PossibleCombosquat.json_key(),
+            "possible_combosquat"
         );
         assert_eq!(TyposquatClass::Unrelated.tag(), "UNRELATED");
         assert_eq!(TyposquatClass::Unrelated.json_key(), "unrelated");
@@ -302,9 +346,30 @@ mod tests {
     }
 
     #[test]
-    fn typosquat_combosquat_unrelated() {
+    fn typosquat_combosquat_affix() {
         assert_eq!(
             class("lodash", "lodash-utils", false),
+            TyposquatClass::PossibleCombosquat
+        );
+        assert_eq!(
+            class("requests", "python-requests", false),
+            TyposquatClass::PossibleCombosquat
+        );
+        assert_eq!(
+            class("lodash", "my-lodash-utils", false),
+            TyposquatClass::PossibleCombosquat
+        );
+    }
+
+    #[test]
+    fn typosquat_not_combosquat_without_delimiter() {
+        assert_eq!(class("react", "reactive", false), TyposquatClass::Unrelated);
+        assert_eq!(
+            class("lodash", "lodashutils", false),
+            TyposquatClass::Unrelated
+        );
+        assert_eq!(
+            class("lodash", "xylophone", false),
             TyposquatClass::Unrelated
         );
     }
