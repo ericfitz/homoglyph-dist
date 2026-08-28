@@ -65,6 +65,56 @@ pub fn damerau(a: &[char], b: &[char]) -> u64 {
     d[idx(n, m)]
 }
 
+/// True when the OSA Damerau distance of `a`→`b` is at most `k`.
+///
+/// Banded DP: only cells with `|i - j| <= k` can lie on a path of cost `<= k`,
+/// so this is `O(n*k)` instead of `O(n*m)`, with no traceback and one row
+/// allocation. Used purely as a gate, so it answers the predicate, not the
+/// distance. Generic over the element type so callers can pass `&[u8]` for
+/// ASCII (no char collect) or `&[char]` otherwise.
+pub fn damerau_within<T: PartialEq>(a: &[T], b: &[T], k: usize) -> bool {
+    let (n, m) = (a.len(), b.len());
+    if n.abs_diff(m) > k {
+        return false;
+    }
+    // `INF` is any value that can never be beaten down to `<= k`.
+    const INF: u32 = u32::MAX / 4;
+    let k32 = k as u32;
+    let cols = m + 1;
+    let mut prev2 = vec![INF; cols]; // row i-2, for the transposition step
+    let mut prev = vec![INF; cols]; // row i-1
+    let mut cur = vec![INF; cols];
+    for (j, cell) in prev.iter_mut().take(m.min(k) + 1).enumerate() {
+        *cell = j as u32;
+    }
+    for i in 1..=n {
+        // Only the band |i - j| <= k can matter.
+        let lo = i.saturating_sub(k);
+        let hi = (i + k).min(m);
+        cur[..cols].fill(INF);
+        if lo == 0 {
+            cur[0] = i as u32;
+        }
+        for j in lo.max(1)..=hi {
+            let sub = prev[j - 1].saturating_add(u32::from(a[i - 1] != b[j - 1]));
+            let del = prev[j].saturating_add(1);
+            let ins = cur[j - 1].saturating_add(1);
+            let mut best = sub.min(del).min(ins);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(prev2[j - 2].saturating_add(1));
+            }
+            cur[j] = best;
+        }
+        // Whole band over `k` means every surviving path already costs more.
+        if cur[lo..=hi].iter().all(|&v| v > k32) {
+            return false;
+        }
+        std::mem::swap(&mut prev2, &mut prev);
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[m] <= k32
+}
+
 /// One operation in an a→b edit alignment, recovered by traceback.
 /// `Sub(i, j)` substitutes `a[i]` with `b[j]` (indices into the original
 /// char slices). `Match` is a zero-cost diagonal step. `Ins`/`Del` are the
@@ -285,5 +335,46 @@ mod tests {
             .filter(|&(i, j)| cmap.confusable(a[i], b[j]))
             .count();
         assert_eq!(confusable_subs, 1);
+    }
+
+    #[test]
+    fn damerau_within_agrees_with_damerau() {
+        // The banded gate must answer exactly `damerau(a, b) <= k`, or it will
+        // silently drop rows the filter would have kept.
+        let words = [
+            "",
+            "a",
+            "ab",
+            "requests",
+            "reqeusts",
+            "rquests",
+            "requestss",
+            "lodash",
+            "lodahs",
+            "xylophone",
+            "paypa1",
+            "abcdefgh",
+            "hgfedcba",
+            "aaaa",
+            "aaab",
+        ];
+        for a in words {
+            for b in words {
+                let (ca, cb): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+                let d = damerau(&ca, &cb);
+                for k in 0..=5u64 {
+                    assert_eq!(
+                        damerau_within(&ca, &cb, k as usize),
+                        d <= k,
+                        "{a} vs {b} at k={k} (damerau={d})"
+                    );
+                    assert_eq!(
+                        damerau_within(a.as_bytes(), b.as_bytes(), k as usize),
+                        d <= k,
+                        "bytes {a} vs {b} at k={k}"
+                    );
+                }
+            }
+        }
     }
 }

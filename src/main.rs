@@ -140,28 +140,59 @@ fn may_emit(
     cmap: &confusables::ConfusableMap,
 ) -> bool {
     if typosquat {
-        // Emitted only as likely_typosquat — which needs `damerau <= 1`
-        // (so the lengths differ by at most 1) or `confusable_only` (so the
-        // skeletons are equal, hence the same length) — or as a combosquat,
-        // which is a cheap string test.
-        return sa.chars().count().abs_diff(sb.chars().count()) <= 1
-            || cmap.skeleton_len(sa) == cmap.skeleton_len(sb)
+        // Emitted only as likely_typosquat — which needs `damerau <= 1` or
+        // `confusable_only` (equal skeletons) — or as a combosquat, which is a
+        // cheap string test.
+        return damerau_within(sa, sb, 1)
+            || (cmap.skeleton_len(sa) == cmap.skeleton_len(sb)
+                && cmap.skeleton_chars(sa) == cmap.skeleton_chars(sb))
             || verdict::is_possible_combosquat(sa, sb);
     }
     let Some(t) = threshold else {
         return true;
     };
     // Edit distance is at least the length difference, on the strings the
-    // metric is measured over.
-    let bound = match metric {
-        "levenshtein" | "damerau" => sa.chars().count().abs_diff(sb.chars().count()),
-        "skeleton_levenshtein" | "skeleton_damerau" => {
-            cmap.skeleton_len(sa).abs_diff(cmap.skeleton_len(sb))
-        }
+    // metric is measured over. Then, for a small integer threshold, a banded
+    // `O(n*k)` Damerau check — an exact test, since damerau <= levenshtein, so
+    // `damerau > k` rules out either metric.
+    let skeleton = match metric {
+        "levenshtein" | "damerau" => false,
+        "skeleton_levenshtein" | "skeleton_damerau" => true,
         // No cheap exact lower bound for the remaining axes.
         _ => return true,
     };
-    bound as f64 <= t
+    let (la, lb) = if skeleton {
+        (cmap.skeleton_len(sa), cmap.skeleton_len(sb))
+    } else {
+        (sa.chars().count(), sb.chars().count())
+    };
+    if (la.abs_diff(lb) as f64) > t {
+        return false;
+    }
+    // Distances are integers, so `d <= t` iff `d <= floor(t)`. Above a small k
+    // the band stops being a saving, and the length bound above already ran.
+    let k = t.floor();
+    if !(0.0..=4.0).contains(&k) {
+        return true;
+    }
+    let k = k as usize;
+    if skeleton {
+        distance::damerau_within(&cmap.skeleton_chars(sa), &cmap.skeleton_chars(sb), k)
+    } else {
+        damerau_within(sa, sb, k)
+    }
+}
+
+/// `damerau_within` on two `&str`, avoiding the char collect when both are
+/// ASCII (bytes and chars coincide there) — the registry-name common case.
+fn damerau_within(sa: &str, sb: &str, k: usize) -> bool {
+    if sa.is_ascii() && sb.is_ascii() {
+        distance::damerau_within(sa.as_bytes(), sb.as_bytes(), k)
+    } else {
+        let ca: Vec<char> = sa.chars().collect();
+        let cb: Vec<char> = sb.chars().collect();
+        distance::damerau_within(&ca, &cb, k)
+    }
 }
 
 /// The selected axis keys to emit, in canonical order: all when None.
