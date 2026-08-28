@@ -83,7 +83,10 @@ pub enum AlignOp {
 /// cell we prefer the diagonal (match/substitution), then deletion, then
 /// insertion, then transposition — chosen so the substitution COUNT is stable.
 /// Used by the `uts39_confusable_count` axis to count confusable substitutions.
-pub fn align(a: &[char], b: &[char]) -> Vec<AlignOp> {
+///
+/// Also returns the Damerau (OSA) distance — the bottom-right cell of the matrix
+/// this already fills, so callers needing both do not fill it twice.
+pub fn align(a: &[char], b: &[char]) -> (Vec<AlignOp>, u64) {
     let (n, m) = (a.len(), b.len());
     let cols = m + 1;
     let mut d = vec![0u64; (n + 1) * cols];
@@ -157,7 +160,7 @@ pub fn align(a: &[char], b: &[char]) -> Vec<AlignOp> {
         break;
     }
     ops.reverse();
-    ops
+    (ops, d[idx(n, m)])
 }
 
 #[cfg(test)]
@@ -165,6 +168,30 @@ mod tests {
     use super::*;
     fn cv(s: &str) -> Vec<char> {
         s.chars().collect()
+    }
+
+    #[test]
+    fn align_cost_matches_damerau() {
+        // The axes layer takes the Damerau distance from align's matrix instead of
+        // filling it twice. That is only sound if the two always agree.
+        for (a, b) in [
+            ("", ""),
+            ("", "abc"),
+            ("abc", ""),
+            ("abc", "abc"),
+            ("kitten", "sitting"),
+            ("ca", "ac"),
+            ("requests", "reqeusts"),
+            ("paypal", "paypa1"),
+            ("a", "bcdefg"),
+            ("vv", "w"),
+        ] {
+            assert_eq!(
+                align(&cv(a), &cv(b)).1,
+                damerau(&cv(a), &cv(b)),
+                "{a} vs {b}"
+            );
+        }
     }
 
     #[test]
@@ -187,7 +214,7 @@ mod tests {
         // "abc" vs "axc": exactly one substitution at position (1,1).
         let a = cv("abc");
         let b = cv("axc");
-        let ops = align(&a, &b);
+        let ops = align(&a, &b).0;
         let subs: Vec<_> = ops
             .iter()
             .filter(|op| matches!(op, AlignOp::Sub(_, _)))
@@ -199,7 +226,7 @@ mod tests {
     #[test]
     fn align_handles_unequal_length() {
         // "ab" vs "abc": one insertion, zero substitutions.
-        let ops = align(&cv("ab"), &cv("abc"));
+        let ops = align(&cv("ab"), &cv("abc")).0;
         assert_eq!(
             ops.iter()
                 .filter(|o| matches!(o, AlignOp::Sub(_, _)))
@@ -212,7 +239,7 @@ mod tests {
     #[test]
     fn align_marks_transposition() {
         // "ca" vs "ac": one transposition, no substitutions.
-        let ops = align(&cv("ca"), &cv("ac"));
+        let ops = align(&cv("ca"), &cv("ac")).0;
         assert_eq!(
             ops.iter()
                 .filter(|o| matches!(o, AlignOp::Sub(_, _)))
@@ -230,8 +257,8 @@ mod tests {
     #[test]
     fn align_is_deterministic_on_ties() {
         // Equal-length unrelated strings: every position substitutes.
-        let ops1 = align(&cv("abc"), &cv("xyz"));
-        let ops2 = align(&cv("abc"), &cv("xyz"));
+        let ops1 = align(&cv("abc"), &cv("xyz")).0;
+        let ops2 = align(&cv("abc"), &cv("xyz")).0;
         assert_eq!(ops1, ops2);
         assert_eq!(
             ops1.iter()
@@ -247,7 +274,7 @@ mod tests {
         // are confusable.
         let a = cv("paypal");
         let b = cv("p\u{0430}ypal");
-        let ops = align(&a, &b);
+        let ops = align(&a, &b).0;
         let cmap = crate::confusables::ConfusableMap::uts39();
         let confusable_subs = ops
             .iter()

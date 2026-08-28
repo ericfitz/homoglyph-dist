@@ -3,6 +3,7 @@
 //! `confusables_data` (UTS#39), `flowcrypt_data`, and `digraph_data` tables.
 
 use crate::confusables_data::CONFUSABLES;
+use std::borrow::Cow;
 
 /// Which supplemental confusable sources are enabled. UTS#39 is always on.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,7 +40,7 @@ pub fn parse_sources(spec: &str) -> Result<Sources, String> {
 pub struct ConfusableMap {
     /// code point -> skeleton string, sorted by key. UTS#39 entries take
     /// precedence on key collision.
-    singles: Vec<(u32, &'static str)>,
+    singles: Cow<'static, [(u32, &'static str)]>,
     /// (digraph source, replacement); longest-match-first. Empty unless enabled.
     digraphs: &'static [(&'static str, &'static str)],
 }
@@ -55,7 +56,8 @@ impl ConfusableMap {
     /// (UTS#39 wins on collision).
     pub fn from_sources(sources: &Sources) -> Self {
         // UTS#39 is the always-on base, sorted by key.
-        let mut singles: Vec<(u32, &'static str)> = CONFUSABLES.to_vec();
+        // Borrowed unless a supplement actually adds entries.
+        let mut singles: Cow<'static, [(u32, &'static str)]> = Cow::Borrowed(CONFUSABLES);
         if sources.flowcrypt {
             // Merge FlowCrypt entries only for keys UTS#39 does not already
             // define (UTS#39 wins). Collect additions first so we never
@@ -68,8 +70,9 @@ impl ConfusableMap {
                     add.push((cp, sk));
                 }
             }
-            singles.extend(add);
-            singles.sort_by_key(|&(k, _)| k);
+            let owned = singles.to_mut();
+            owned.extend(add);
+            owned.sort_by_key(|&(k, _)| k);
         }
         let digraphs: &'static [(&'static str, &'static str)] = if sources.digraph {
             crate::digraph_data::DIGRAPHS
@@ -104,13 +107,25 @@ impl ConfusableMap {
         sa == sb
     }
 
-    /// Full skeleton of a string: longest-match-first over digraph source keys,
-    /// else per-char single-char mapping, else the char unchanged. Single,
-    /// non-recursive pass.
-    pub fn skeleton(&self, s: &str) -> String {
+    /// Full skeleton of a string as chars: longest-match-first over digraph
+    /// source keys, else per-char single-char mapping, else the char unchanged.
+    /// Single, non-recursive pass.
+    ///
+    /// Chars, not a `String`, because every caller on the hot path wants
+    /// `Vec<char>` — going through a `String` cost two allocations per string.
+    pub fn skeleton_chars(&self, s: &str) -> Vec<char> {
+        let mut out: Vec<char> = Vec::with_capacity(s.len());
+        if self.digraphs.is_empty() {
+            // Default source set: no multi-char keys, so no lookahead buffer.
+            for c in s.chars() {
+                match self.skeleton_of(c) {
+                    Some(sk) => out.extend(sk.chars()),
+                    None => out.push(c),
+                }
+            }
+            return out;
+        }
         let chars: Vec<char> = s.chars().collect();
-        let mut out = String::with_capacity(s.len());
-        let mut buf = [0u8; 4];
         let mut i = 0;
         while i < chars.len() {
             // Try digraphs longest-first. Current keys are all length 2; the
@@ -119,27 +134,34 @@ impl ConfusableMap {
             let mut best_rep = "";
             for &(src, rep) in self.digraphs {
                 let klen = src.chars().count();
-                if klen > best_len && i + klen <= chars.len() {
-                    let window: String = chars[i..i + klen].iter().collect();
-                    if window == src {
-                        best_len = klen;
-                        best_rep = rep;
-                    }
+                if klen > best_len
+                    && i + klen <= chars.len()
+                    && src.chars().eq(chars[i..i + klen].iter().copied())
+                {
+                    best_len = klen;
+                    best_rep = rep;
                 }
             }
             if best_len > 0 {
-                out.push_str(best_rep);
+                out.extend(best_rep.chars());
                 i += best_len;
             } else {
                 let c = chars[i];
                 match self.skeleton_of(c) {
-                    Some(sk) => out.push_str(sk),
-                    None => out.push_str(c.encode_utf8(&mut buf)),
+                    Some(sk) => out.extend(sk.chars()),
+                    None => out.push(c),
                 }
                 i += 1;
             }
         }
         out
+    }
+
+    /// String form of [`ConfusableMap::skeleton_chars`]. Test-only: the hot
+    /// path wants chars.
+    #[cfg(test)]
+    pub fn skeleton(&self, s: &str) -> String {
+        self.skeleton_chars(s).into_iter().collect()
     }
 }
 

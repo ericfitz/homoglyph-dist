@@ -22,6 +22,10 @@ use std::env;
 use std::process::ExitCode;
 use verdict::{classify_typosquat, verdict, TyposquatClass};
 
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
+
 /// A scored row carried through batch/list modes: originals, optional norms, panel.
 struct Row {
     a: String,
@@ -532,6 +536,9 @@ fn parse_args() -> Result<Opts, String> {
 }
 
 fn main() -> ExitCode {
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = dhat::Profiler::new_heap();
+
     let opts = match parse_args() {
         Ok(v) => v,
         Err(e) => {

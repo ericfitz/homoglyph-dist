@@ -7,7 +7,7 @@
 
 use crate::confusables::ConfusableMap;
 use crate::distance::{self, AlignOp};
-use unicode_security::{RestrictionLevel, RestrictionLevelDetection};
+use unicode_security::{GeneralSecurityProfile, RestrictionLevel, RestrictionLevelDetection};
 
 /// The value an axis produces. The output formatter renders each variant.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -90,13 +90,12 @@ pub struct PairContext<'a> {
     pub b: &'a str,
     pub ca: Vec<char>,
     pub cb: Vec<char>,
-    #[allow(dead_code)] // string-form skeletons; used in tests + consumed by Phase 4 threading
-    pub ska: String,
-    #[allow(dead_code)] // string-form skeletons; used in tests + consumed by Phase 4 threading
-    pub skb: String,
     pub sva: Vec<char>,
     pub svb: Vec<char>,
     pub align: Vec<AlignOp>,
+    /// Damerau (OSA) distance of `ca`/`cb` — the bottom-right cell of the matrix
+    /// `align` already filled, so the `damerau` axis does not fill it a second time.
+    pub damerau: u64,
     pub cmap: &'a ConfusableMap,
 }
 
@@ -104,21 +103,18 @@ impl<'a> PairContext<'a> {
     pub fn new(a: &'a str, b: &'a str, cmap: &'a ConfusableMap) -> Self {
         let ca: Vec<char> = a.chars().collect();
         let cb: Vec<char> = b.chars().collect();
-        let ska = cmap.skeleton(a);
-        let skb = cmap.skeleton(b);
-        let sva: Vec<char> = ska.chars().collect();
-        let svb: Vec<char> = skb.chars().collect();
-        let align = distance::align(&ca, &cb);
+        let sva = cmap.skeleton_chars(a);
+        let svb = cmap.skeleton_chars(b);
+        let (align, damerau) = distance::align(&ca, &cb);
         PairContext {
             a,
             b,
             ca,
             cb,
-            ska,
-            skb,
             sva,
             svb,
             align,
+            damerau,
             cmap,
         }
     }
@@ -141,6 +137,24 @@ pub trait Axis: Sync {
 
 /// Map a UTS#39 restriction level to its 0–5 ordinal (lower = more restrictive
 /// = safer). Explicit match so the mapping is stable if the enum is reordered.
+/// UTS#39 restriction level of one string, as an ordinal.
+///
+/// ASCII fast path: `detect_restriction_level` intersects an `AugmentedScriptSet`
+/// per char, which is pure waste on the ASCII names that dominate real corpora.
+/// An all-ASCII string is `ASCIIOnly` (0) unless some char is outside the UTS#39
+/// identifier profile, in which case the crate returns `Unrestricted` (5) — so the
+/// fast path is exactly equivalent, not an approximation.
+fn restriction_ordinal(s: &str) -> u64 {
+    if s.is_ascii() {
+        return if s.chars().all(GeneralSecurityProfile::identifier_allowed) {
+            0
+        } else {
+            5
+        };
+    }
+    level_ordinal(s.detect_restriction_level())
+}
+
 fn level_ordinal(level: RestrictionLevel) -> u64 {
     match level {
         RestrictionLevel::ASCIIOnly => 0,
@@ -199,7 +213,7 @@ impl Axis for Damerau {
         Phase::Base
     }
     fn compute(&self, ctx: &PairContext, _base: &Panel) -> AxisValue {
-        AxisValue::Int(distance::damerau(&ctx.ca, &ctx.cb))
+        AxisValue::Int(ctx.damerau)
     }
 }
 
@@ -319,8 +333,8 @@ impl Axis for ScriptRestriction {
         // UTS#39 restriction level of the pair: the more-suspicious (max) of the
         // two strings' levels. Latin+Cyrillic etc. has no consistent resolved
         // script and scores high — the direct mixed-script spoof signal.
-        let la = level_ordinal(ctx.a.detect_restriction_level());
-        let lb = level_ordinal(ctx.b.detect_restriction_level());
+        let la = restriction_ordinal(ctx.a);
+        let lb = restriction_ordinal(ctx.b);
         AxisValue::Int(la.max(lb))
     }
 }
@@ -362,7 +376,7 @@ impl Axis for KeyboardDistance {
             return AxisValue::Float(0.0);
         }
         let mean = sum / count as f32;
-        let normalized = (mean / crate::keyboard::max_key_distance()).clamp(0.0, 1.0);
+        let normalized = (mean / crate::keyboard::MAX_KEY_DISTANCE).clamp(0.0, 1.0);
         AxisValue::Float(normalized as f64)
     }
 }
@@ -452,21 +466,24 @@ pub static ALL_AXES: &[&dyn Axis] = &[
 /// order), phase 2 computes every derived axis (reading a snapshot of the base
 /// map). Returns `Panel.entries` in canonical registry order.
 pub fn build_panel(ctx: &PairContext) -> Panel {
-    let mut panel = Panel::default();
+    let mut panel = Panel {
+        entries: Vec::with_capacity(ALL_AXES.len()),
+    };
     // Phase 1: base axes, in registry order.
     for ax in ALL_AXES.iter().filter(|ax| ax.phase() == Phase::Base) {
         let v = ax.compute(ctx, &panel);
         panel.entries.push((ax.key(), v));
     }
-    // Phase 2: derived axes read a frozen snapshot of the base results.
-    let base_snapshot = panel.clone();
+    // Phase 2: derived axes read the base results. No snapshot clone is needed —
+    // each value is computed before its own key is pushed, and no derived axis
+    // reads another derived axis.
     for ax in ALL_AXES.iter().filter(|ax| ax.phase() == Phase::Derived) {
-        let v = ax.compute(ctx, &base_snapshot);
+        let v = ax.compute(ctx, &panel);
         panel.entries.push((ax.key(), v));
     }
     // Re-order entries into canonical ALL_AXES order so emit order matches the
     // registry regardless of phase grouping.
-    panel.entries.sort_by_key(|(k, _)| {
+    panel.entries.sort_unstable_by_key(|(k, _)| {
         ALL_AXES
             .iter()
             .position(|ax| ax.key() == *k)
@@ -612,7 +629,7 @@ mod tests {
         assert_eq!(ctx.ca.len(), 6);
         assert_eq!(ctx.cb.len(), 6);
         // Cyrillic а collapses to Latin a in the skeleton.
-        assert_eq!(ctx.ska, ctx.skb);
+        assert_eq!(ctx.sva, ctx.svb);
         // Alignment has exactly one substitution.
         let subs = ctx
             .align

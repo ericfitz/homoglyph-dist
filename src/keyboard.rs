@@ -24,7 +24,13 @@ pub fn key_coord(c: char) -> Option<(f32, f32)> {
 }
 
 /// The maximum Euclidean distance between any two modelled keys — the normalizer
-/// so keyboard_distance lands in [0,1]. Deterministic; computed from the table.
+/// so keyboard_distance lands in [0,1]. Fixed by the table above; `max_key_distance`
+/// (test-only) recomputes it and `const_matches_computed` asserts they agree bit-for-bit.
+pub const MAX_KEY_DISTANCE: f32 = 11.543396;
+
+/// Recompute [`MAX_KEY_DISTANCE`] from the table. Test-only: it is O(K^2) with a
+/// `sqrt` per pair, which used to run on every scored pair.
+#[cfg(test)]
 pub fn max_key_distance() -> f32 {
     const ALL: &str = "1234567890-=qwertyuiop[]asdfghjkl;'zxcvbnm,./";
     let coords: Vec<(f32, f32)> = ALL.chars().filter_map(key_coord).collect();
@@ -48,6 +54,11 @@ mod tests {
         let (x1, y1) = key_coord(a).unwrap();
         let (x2, y2) = key_coord(b).unwrap();
         ((x1 - x2).powi(2) + (y1 - y2).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn const_matches_computed() {
+        assert_eq!(MAX_KEY_DISTANCE.to_bits(), max_key_distance().to_bits());
     }
 
     #[test]

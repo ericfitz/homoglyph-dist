@@ -28,6 +28,11 @@ path = "src/main.rs"
 
 [dependencies]
 unicode-security = "0.1.2"
+# Heap profiler, off by default: cargo build --release --features dhat-heap
+dhat = { version = "0.3", optional = true }
+
+[features]
+dhat-heap = ["dep:dhat"]
 
 [profile.release]
 opt-level = 3
