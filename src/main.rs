@@ -72,11 +72,25 @@ struct PairPrep {
     same_project: bool,
 }
 
+/// The identity gate, on strings alone: `(identical, same_project)`. Split out
+/// so list mode can apply it against a query it normalized once, instead of
+/// re-normalizing the query for every candidate.
+fn identity_gate(a: &str, b: &str, a_norm: Option<&str>, b_norm: Option<&str>) -> (bool, bool) {
+    let identical = a == b;
+    let same_project = a_norm.is_some() && !identical && a_norm == b_norm;
+    (identical, same_project)
+}
+
+/// Whether the panel scores the normalized forms rather than the originals.
+/// Identity-gated pairs are scored on their originals.
+fn scores_normalized(has_norm: bool, identical: bool, same_project: bool) -> bool {
+    has_norm && !identical && !same_project
+}
+
 impl PairPrep {
-    /// The two strings the panel scores: the normalized forms, except for
-    /// identity-gated pairs, which are scored on their originals.
+    /// The two strings the panel scores.
     fn scored<'s>(&'s self, a: &'s str, b: &'s str) -> (&'s str, &'s str) {
-        if self.a_norm.is_some() && !self.identical && !self.same_project {
+        if scores_normalized(self.a_norm.is_some(), self.identical, self.same_project) {
             (
                 self.a_norm.as_deref().unwrap(),
                 self.b_norm.as_deref().unwrap(),
@@ -91,8 +105,7 @@ fn prep_pair(a: &str, b: &str, ops: &[normalize::NormOp]) -> PairPrep {
     let on = !ops.is_empty();
     let a_norm = on.then(|| normalize::apply_ops(a, ops));
     let b_norm = on.then(|| normalize::apply_ops(b, ops));
-    let identical = a == b;
-    let same_project = on && !identical && a_norm.as_deref() == b_norm.as_deref();
+    let (identical, same_project) = identity_gate(a, b, a_norm.as_deref(), b_norm.as_deref());
     PairPrep {
         a_norm,
         b_norm,
@@ -125,6 +138,42 @@ fn prepare_pair(
     }
 }
 
+/// One string with everything the emit gate needs precomputed. Built once per
+/// query in list mode, where the `--string` side is otherwise re-normalized,
+/// re-collected and re-skeletonized for every candidate line.
+struct Prepped {
+    s: String,
+    chars: Vec<char>,
+    skel: Vec<char>,
+}
+
+impl Prepped {
+    fn new(s: String, cmap: &confusables::ConfusableMap) -> Self {
+        Prepped {
+            chars: s.chars().collect(),
+            skel: cmap.skeleton_chars(&s),
+            s,
+        }
+    }
+}
+
+/// The `--string` side of list mode: the original, plus its normalized form
+/// when a normalizer is configured. Which one the panel scores depends on the
+/// candidate (see `scores_normalized`), so both are prepared up front.
+struct Query {
+    raw: Prepped,
+    norm: Option<Prepped>,
+}
+
+impl Query {
+    fn new(s: &str, ops: &[normalize::NormOp], cmap: &confusables::ConfusableMap) -> Self {
+        Query {
+            raw: Prepped::new(s.to_string(), cmap),
+            norm: (!ops.is_empty()).then(|| Prepped::new(normalize::apply_ops(s, ops), cmap)),
+        }
+    }
+}
+
 /// Could this pair possibly survive the emit filter? Conservative in the safe
 /// direction: it may return true for a pair that is later dropped, but never
 /// false for one that would be kept — every bound below is an exact lower bound
@@ -132,20 +181,20 @@ fn prepare_pair(
 /// candidates that can never be emitted, which is nearly all of them on a real
 /// registry corpus.
 fn may_emit(
-    sa: &str,
+    qa: &Prepped,
     sb: &str,
     metric: &str,
     threshold: Option<f64>,
     typosquat: bool,
     cmap: &confusables::ConfusableMap,
 ) -> bool {
+    let sa = qa.s.as_str();
     if typosquat {
         // Emitted only as likely_typosquat — which needs `damerau <= 1` or
         // `confusable_only` (equal skeletons) — or as a combosquat, which is a
         // cheap string test.
         return damerau_within(sa, sb, 1)
-            || (cmap.skeleton_len(sa) == cmap.skeleton_len(sb)
-                && cmap.skeleton_chars(sa) == cmap.skeleton_chars(sb))
+            || (qa.skel.len() == cmap.skeleton_len(sb) && qa.skel == cmap.skeleton_chars(sb))
             || verdict::is_possible_combosquat(sa, sb);
     }
     let Some(t) = threshold else {
@@ -162,9 +211,9 @@ fn may_emit(
         _ => return true,
     };
     let (la, lb) = if skeleton {
-        (cmap.skeleton_len(sa), cmap.skeleton_len(sb))
+        (qa.skel.len(), cmap.skeleton_len(sb))
     } else {
-        (sa.chars().count(), sb.chars().count())
+        (qa.chars.len(), sb.chars().count())
     };
     if (la.abs_diff(lb) as f64) > t {
         return false;
@@ -177,7 +226,7 @@ fn may_emit(
     }
     let k = k as usize;
     if skeleton {
-        distance::damerau_within(&cmap.skeleton_chars(sa), &cmap.skeleton_chars(sb), k)
+        distance::damerau_within(&qa.skel, &cmap.skeleton_chars(sb), k)
     } else {
         damerau_within(sa, sb, k)
     }
@@ -327,10 +376,11 @@ fn keep_scored(s: PairScore, metric: &str, threshold: Option<f64>, typosquat: bo
     })
 }
 
-/// Score `string` against one raw candidate line. Returns the scored row, or
-/// None if blank, not a likely typosquat (when filtering), or over threshold.
-fn score_candidate(
-    string: &str,
+/// Score a prepared query against one raw candidate line. Returns the scored
+/// row, or None if blank, not a likely typosquat (when filtering), or over
+/// threshold.
+fn score_candidate_q(
+    q: &Query,
     raw: &str,
     metric: &str,
     threshold: Option<f64>,
@@ -342,16 +392,48 @@ fn score_candidate(
     if line.is_empty() {
         return None;
     }
-    let prep = prep_pair(string, line, ops);
-    let (sa, sb) = prep.scored(string, line);
-    if !may_emit(sa, sb, metric, threshold, typosquat, cmap) {
+    let b_norm = q.norm.as_ref().map(|_| normalize::apply_ops(line, ops));
+    let (identical, same_project) = identity_gate(
+        &q.raw.s,
+        line,
+        q.norm.as_ref().map(|p| p.s.as_str()),
+        b_norm.as_deref(),
+    );
+    let (qa, sb) = if scores_normalized(q.norm.is_some(), identical, same_project) {
+        (q.norm.as_ref().unwrap(), b_norm.as_deref().unwrap())
+    } else {
+        (&q.raw, line)
+    };
+    if !may_emit(qa, sb, metric, threshold, typosquat, cmap) {
         return None;
     }
-    drop(prep);
     keep_scored(
-        prepare_pair(string, line, ops, cmap),
+        prepare_pair(&q.raw.s, line, ops, cmap),
         metric,
         threshold,
+        typosquat,
+    )
+}
+
+/// `score_candidate_q` for a single unprepared query — the batch loops build the
+/// `Query` once and call the `_q` form directly.
+#[cfg(test)]
+fn score_candidate(
+    string: &str,
+    raw: &str,
+    metric: &str,
+    threshold: Option<f64>,
+    cmap: &confusables::ConfusableMap,
+    ops: &[normalize::NormOp],
+    typosquat: bool,
+) -> Option<Row> {
+    score_candidate_q(
+        &Query::new(string, ops, cmap),
+        raw,
+        metric,
+        threshold,
+        cmap,
+        ops,
         typosquat,
     )
 }
@@ -370,8 +452,9 @@ fn process_list<I: Iterator<Item = String>>(
     ops: &[normalize::NormOp],
     typosquat: bool,
 ) -> Vec<Row> {
+    let q = Query::new(string, ops, cmap);
     let mut rows: Vec<Row> = lines
-        .filter_map(|raw| score_candidate(string, &raw, metric, threshold, cmap, ops, typosquat))
+        .filter_map(|raw| score_candidate_q(&q, &raw, metric, threshold, cmap, ops, typosquat))
         .collect();
     if sort || top.is_some() {
         rows = sort_and_truncate(rows, metric, top);
@@ -711,9 +794,10 @@ fn main() -> ExitCode {
                 );
             }
         } else {
+            let q = Query::new(string, &ops, &cmap);
             for raw in lines {
-                if let Some(row) = score_candidate(
-                    string,
+                if let Some(row) = score_candidate_q(
+                    &q,
                     &raw,
                     opts.metric,
                     opts.threshold,
