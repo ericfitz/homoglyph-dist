@@ -20,6 +20,7 @@ Performance work has its own tooling — see [docs/performance-plan.md](docs/per
 ```sh
 scripts/fetch-corpus.sh          # package-name corpora -> git-ignored corpus/
 scripts/golden.sh capture|check  # output-regression gate over the full PyPI corpus (~2.5 min)
+scripts/quality.sh capture|check # recall on 143 labeled pairs + emitted-row counts (~2 min)
 scripts/bench.sh <name>          # hyperfine matrix -> bench-out/<name>/
 cargo build --release --features dhat-heap \
   --config profile.release.strip=false --config profile.release.debug=1   # heap profile
@@ -27,6 +28,12 @@ cargo build --release --features dhat-heap \
 
 **Any change that touches scoring must leave `scripts/golden.sh check` clean.** The JSON output
 contract below is what it pins; the optimizations to date are all output-preserving.
+
+**Any change that touches the emit gate must also leave `scripts/quality.sh check` clean.** golden.sh
+pins output for the queries it names; quality.sh pins *detection* — per-technique recall over the 143
+labeled typosquat pairs, plus emitted-row counts over a top-15k x full-PyPI sweep. It is the gate
+that would catch a future prune trading recall for speed. Both were verified to fail on a
+deliberately narrowed gate, not merely to pass.
 
 There is no separate lint config; use `cargo clippy` and `cargo fmt --check`.
 
