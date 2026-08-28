@@ -34,8 +34,8 @@ There is no separate lint config; use `cargo clippy` and `cargo fmt --check`.
 
 Ten source files plus build-time helpers:
 
-- [src/main.rs](src/main.rs) — CLI arg parsing (`Opts`), I/O, the three modes (single-pair / `--stdin` batch / `--string`+`--list` watchlist), output formatting (human table + JSONL), and orchestration calling the panel + verdict / typosquat classification. Batch/list scoring is split so the cheap part runs first: `prep_pair` (normalization + identity gate) decides which strings would be scored, `may_emit` asks whether the pair could possibly survive the emit filter, and only survivors get a panel. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
-- [src/distance.rs](src/distance.rs) — edit distances only: unweighted integer `levenshtein`, `damerau` OSA, and the alignment traceback (`AlignOp` + `align`, which returns `(Vec<AlignOp>, u64)` — the ops plus the Damerau distance from the matrix it already fills, so callers needing both never fill it twice). **The skeleton model has moved to `src/confusables.rs`** — `distance.rs` no longer contains `skeleton_of`, `skeleton`, or `confusable`.
+- [src/main.rs](src/main.rs) — CLI arg parsing (`Opts`), I/O, the three modes (single-pair / `--stdin` batch / `--string`+`--list` watchlist), output formatting (human table + JSONL), and orchestration calling the panel + verdict / typosquat classification. Batch/list scoring is split so the cheap part runs first: the identity gate (`identity_gate` + `scores_normalized`) decides which strings would be scored, `may_emit` asks whether the pair could possibly survive the emit filter, and only survivors get a panel. List mode builds a `Query` once (a `Prepped` — string + char vector + skeleton — for the raw query and, when a normalizer is configured, for its normalized form), so the `--string` side is never re-normalized or re-skeletonized per candidate. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
+- [src/distance.rs](src/distance.rs) — edit distances only: unweighted integer `levenshtein`, `damerau` OSA, `damerau_within` (the banded `O(n*k)` `damerau <= k` predicate used by the list-mode emit gate; generic over the element type so callers can pass `&[u8]` for ASCII), and the alignment traceback (`AlignOp` + `align`, which returns `(Vec<AlignOp>, u64)` — the ops plus the Damerau distance from the matrix it already fills, so callers needing both never fill it twice). **The skeleton model has moved to `src/confusables.rs`** — `distance.rs` no longer contains `skeleton_of`, `skeleton`, or `confusable`.
 - [src/confusables.rs](src/confusables.rs) — runtime confusable model: `ConfusableMap` (active single-char map + digraph list built from the selected sources), `parse_sources` (validates the `--confusables` comma-list and returns `Result<Sources, String>`, where `Sources` is a `{ flowcrypt: bool, digraph: bool }` struct — `uts39` is always on), and the `ConfusableMap` methods `skeleton_of`, `confusable`, `skeleton_chars` (the hot path: skeleton straight to `Vec<char>`, with a no-lookahead fast path when no digraphs are active), `skeleton_len` (a skeleton's char count without building it — used by the list-mode emit gate), and `skeleton` (the `String` form, test-only). The map is source-parameterized and threaded through `PairContext`, and borrows the static UTS#39 table unless a supplement adds entries.
 - [src/axes.rs](src/axes.rs) — the `Axis` trait, `AxisValue` (Int/Float/Bool/NA), `Direction`, `Phase`, `PairContext` (per-pair precompute: char vectors, skeleton char vectors, the alignment, and the Damerau distance the alignment already yielded), the 10 axis impls, `ALL_AXES` registry (canonical order = single source of truth for JSON key order and emit order), the two-phase base/derived `build_panel`, and `--fields`/`--metric` parsing and validation (`parse_fields`, `validate_metric`, `metric_value`). `AxisValue::NA` renders as JSON `null` and human `n/a`; its `as_f64()` returns `None`, and `row_metric` falls back to `f64::INFINITY` so NA rows never match a finite `-t` and sort last.
 - [src/keyboard.rs](src/keyboard.rs) — embedded stagger-aware US-QWERTY key-coordinate table for `keyboard_distance`; no external dependency. `MAX_KEY_DISTANCE` (the [0,1] normalizer) is a const; the O(K²) sweep that derives it is test-only, and `const_matches_computed` asserts they agree bit-for-bit.
@@ -59,15 +59,23 @@ Three modes, dispatched by a thin `main()`:
 | stdin batch | `--stdin` | pre-paired tab/comma lines | `a`/`b` |
 | watchlist | `--string` + `--list` | `--string` × each file line | `input`/`match` |
 
-**Emit gate (batch/list only).** `may_emit` in `main.rs` rejects candidates from string lengths
-alone, before any panel is built — on a registry corpus that is nearly all of them. Every bound is
-an *exact* lower bound, so the gate is a pure short-circuit, never a heuristic filter: with `-t`,
-edit distance is at least the length difference on whichever strings the chosen metric scores (raw
-for `levenshtein`/`damerau`, skeleton for the skeleton axes; the other axes have no cheap bound and
-are not gated); with `--typosquat`, a row is emitted only as `likely_typosquat` — needing
-`damerau <= 1` (lengths within 1) or `confusable_only` (equal skeletons, hence equal skeleton
-length) — or as a combosquat, which is a string test. **If you add or change an emit condition, the
-gate must be widened to match**, or rows will silently vanish. `gate_never_drops_a_row_the_filter_
+**Emit gate (batch/list only).** `may_emit` in `main.rs` rejects candidates before any panel is
+built — on a registry corpus that is nearly all of them. Every test is *exact*, so the gate is a
+pure short-circuit, never a heuristic filter. Two stages, cheapest first:
+
+1. **Length bound.** Edit distance is at least the length difference, on whichever strings the
+   chosen metric scores (raw for `levenshtein`/`damerau`, skeleton for the skeleton axes; the other
+   axes have no cheap bound and are not gated).
+2. **Banded Damerau.** `distance::damerau_within(a, b, k)` — an `O(n*k)` OSA DP over the band
+   `|i - j| <= k`, no traceback, early exit once the whole band exceeds `k`. It answers
+   `damerau <= k`, not the distance. Exact for either metric because `damerau <= levenshtein`, and
+   `k = floor(t)` because distances are integers. Skipped for `k > 4`, where the band stops paying.
+   ASCII pairs run on bytes, avoiding the char collect.
+
+With `--typosquat`, a row is emitted only as `likely_typosquat` — needing `damerau <= 1` or
+`confusable_only` (equal skeletons) — or as a combosquat, which is a string test; the gate tests
+exactly those. **If you add or change an emit condition, the gate must be widened to match**, or
+rows will silently vanish. `gate_never_drops_a_row_the_filter_
 would_keep` cross-checks gated against unconditional scoring over every metric × threshold × mode.
 
 **`--typosquat` profile:** opt-in package-registry detection profile. Default emit set is five axes (`equal`, `damerau`, `skeleton_damerau`, `confusable_only`, `keyboard_distance`); default `--metric` becomes `damerau` (unless `-m` was passed). Classifies each pair as `identical` / `same_project` / `likely_typosquat` / `possible_combosquat` / `unrelated` and emits `classification` + `reason` JSON keys (after axes). In batch/list mode, emits **only** `likely_typosquat` and `possible_combosquat` rows and exits 1 if none. Cannot combine with `-t`/`--threshold`. `classification` is not an axis — `--fields` remains axis-only. A possible combosquat is a delimited affix/token of the other scored name (`-`, `_`, `.`, `/`; shorter side ≥ 3 chars).
