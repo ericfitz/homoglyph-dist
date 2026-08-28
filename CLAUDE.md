@@ -10,10 +10,23 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```sh
 cargo build --release    # -> target/release/sqdist
-cargo test               # unit tests live in each module's #[cfg(test)] block; cargo test runs all (currently 131)
+cargo test               # unit tests live in each module's #[cfg(test)] block; cargo test runs all (currently 136)
 cargo test <name>        # run a single test, e.g. cargo test confusable_only_axis
 cargo run -- <A> <B>     # run against two strings (note the -- before args)
 ```
+
+Performance work has its own tooling — see [docs/performance-plan.md](docs/performance-plan.md):
+
+```sh
+scripts/fetch-corpus.sh          # package-name corpora -> git-ignored corpus/
+scripts/golden.sh capture|check  # output-regression gate over the full PyPI corpus (~2.5 min)
+scripts/bench.sh <name>          # hyperfine matrix -> bench-out/<name>/
+cargo build --release --features dhat-heap \
+  --config profile.release.strip=false --config profile.release.debug=1   # heap profile
+```
+
+**Any change that touches scoring must leave `scripts/golden.sh check` clean.** The JSON output
+contract below is what it pins; the optimizations to date are all output-preserving.
 
 There is no separate lint config; use `cargo clippy` and `cargo fmt --check`.
 
@@ -21,16 +34,17 @@ There is no separate lint config; use `cargo clippy` and `cargo fmt --check`.
 
 Ten source files plus build-time helpers:
 
-- [src/main.rs](src/main.rs) — CLI arg parsing (`Opts`), I/O, the three modes (single-pair / `--stdin` batch / `--string`+`--list` watchlist), output formatting (human table + JSONL), and orchestration calling the panel + verdict / typosquat classification. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
-- [src/distance.rs](src/distance.rs) — edit distances only: unweighted integer `levenshtein`, `damerau` OSA, and the alignment traceback (`AlignOp` + `align`). **The skeleton model has moved to `src/confusables.rs`** — `distance.rs` no longer contains `skeleton_of`, `skeleton`, or `confusable`.
-- [src/confusables.rs](src/confusables.rs) — runtime confusable model: `ConfusableMap` (active single-char map + digraph list built from the selected sources), `parse_sources` (validates the `--confusables` comma-list and returns `Result<Sources, String>`, where `Sources` is a `{ flowcrypt: bool, digraph: bool }` struct — `uts39` is always on), and `ConfusableMap` methods `skeleton_of`, `skeleton`, and `confusable` (formerly in `distance.rs`). The map is source-parameterized and threaded through `PairContext`.
-- [src/axes.rs](src/axes.rs) — the `Axis` trait, `AxisValue` (Int/Float/Bool/NA), `Direction`, `Phase`, `PairContext` (per-pair precompute), the 10 axis impls, `ALL_AXES` registry (canonical order = single source of truth for JSON key order and emit order), the two-phase base/derived `build_panel`, and `--fields`/`--metric` parsing and validation (`parse_fields`, `validate_metric`, `metric_value`). `AxisValue::NA` renders as JSON `null` and human `n/a`; its `as_f64()` returns `None`, and `row_metric` falls back to `f64::INFINITY` so NA rows never match a finite `-t` and sort last.
-- [src/keyboard.rs](src/keyboard.rs) — embedded stagger-aware US-QWERTY key-coordinate table for `keyboard_distance`; no external dependency.
+- [src/main.rs](src/main.rs) — CLI arg parsing (`Opts`), I/O, the three modes (single-pair / `--stdin` batch / `--string`+`--list` watchlist), output formatting (human table + JSONL), and orchestration calling the panel + verdict / typosquat classification. Batch/list scoring is split so the cheap part runs first: `prep_pair` (normalization + identity gate) decides which strings would be scored, `may_emit` asks whether the pair could possibly survive the emit filter, and only survivors get a panel. The release profile (Cargo.toml) is tuned for a small fast binary (`lto`, `panic = "abort"`, `strip`).
+- [src/distance.rs](src/distance.rs) — edit distances only: unweighted integer `levenshtein`, `damerau` OSA, and the alignment traceback (`AlignOp` + `align`, which returns `(Vec<AlignOp>, u64)` — the ops plus the Damerau distance from the matrix it already fills, so callers needing both never fill it twice). **The skeleton model has moved to `src/confusables.rs`** — `distance.rs` no longer contains `skeleton_of`, `skeleton`, or `confusable`.
+- [src/confusables.rs](src/confusables.rs) — runtime confusable model: `ConfusableMap` (active single-char map + digraph list built from the selected sources), `parse_sources` (validates the `--confusables` comma-list and returns `Result<Sources, String>`, where `Sources` is a `{ flowcrypt: bool, digraph: bool }` struct — `uts39` is always on), and the `ConfusableMap` methods `skeleton_of`, `confusable`, `skeleton_chars` (the hot path: skeleton straight to `Vec<char>`, with a no-lookahead fast path when no digraphs are active), `skeleton_len` (a skeleton's char count without building it — used by the list-mode emit gate), and `skeleton` (the `String` form, test-only). The map is source-parameterized and threaded through `PairContext`, and borrows the static UTS#39 table unless a supplement adds entries.
+- [src/axes.rs](src/axes.rs) — the `Axis` trait, `AxisValue` (Int/Float/Bool/NA), `Direction`, `Phase`, `PairContext` (per-pair precompute: char vectors, skeleton char vectors, the alignment, and the Damerau distance the alignment already yielded), the 10 axis impls, `ALL_AXES` registry (canonical order = single source of truth for JSON key order and emit order), the two-phase base/derived `build_panel`, and `--fields`/`--metric` parsing and validation (`parse_fields`, `validate_metric`, `metric_value`). `AxisValue::NA` renders as JSON `null` and human `n/a`; its `as_f64()` returns `None`, and `row_metric` falls back to `f64::INFINITY` so NA rows never match a finite `-t` and sort last.
+- [src/keyboard.rs](src/keyboard.rs) — embedded stagger-aware US-QWERTY key-coordinate table for `keyboard_distance`; no external dependency. `MAX_KEY_DISTANCE` (the [0,1] normalizer) is a const; the O(K²) sweep that derives it is test-only, and `const_matches_computed` asserts they agree bit-for-bit.
 - [src/normalize.rs](src/normalize.rs) — registry-name normalizer: `NormOp` (`Lower` / `Map` / `Collapse`), `apply_ops`, hand-rolled JSON `parse_ops` / `load_ops_file` (no serde), and `pypi_ops()` (PEP 503: lower → map `._-` → `-` → collapse `-`). Used by `--pypi` and `-n`/`--normalize <PATH>`.
 - [src/verdict.rs](src/verdict.rs) — `Verdict` enum + `verdict()` (single-pair human spoof/benign tags), plus `TyposquatClass` + `classify_typosquat()` for the `--typosquat` classification (`identical` / `same_project` / `likely_typosquat` / `possible_combosquat` / `unrelated`). Classification is **not** an axis — it is never in `ALL_AXES` / `--fields`.
 - [src/confusables_data.rs](src/confusables_data.rs) — **auto-generated, do not hand-edit.** A `pub static CONFUSABLES: &[(u32, &str)]` slice (~6565 entries) sorted by code point, embedded at compile time so the binary needs no runtime data files or network.
 - [src/flowcrypt_data.rs](src/flowcrypt_data.rs) — **auto-generated, do not hand-edit.** FlowCrypt `idn-homographs-database` single-char supplement: a `pub static FLOWCRYPT: &[(u32, &str)]` slice (look-alike code point → UTS#39-anchored skeleton string) + a `pub static FLOWCRYPT_PROVENANCE: &str` (repo commit + retrieval date, surfaced by `-v`). Generated by `scripts/gen_flowcrypt.py`; the 19 MB source JSON is not committed.
 - [src/digraph_data.rs](src/digraph_data.rs) — three curated multi-char digraph mappings (`vv→w`, `cl→d`, `nn→rn`) as a `pub static DIGRAPHS: &[(&str, &str)]` slice. Hand-edited; changes are intentional additions of curated mappings.
+- [Cargo.toml](Cargo.toml) — one runtime dependency (`unicode-security`). `dhat` is an optional dev-only heap profiler behind the `dhat-heap` feature, off by default.
 - [build.rs](build.rs) — compile-time git SHA capture (runs `git rev-parse --short HEAD`, exposes `SQDIST_GIT_SHA` env var, falls back to "unknown" for crates.io/git-less builds).
 - [scripts/gen_confusables.py](scripts/gen_confusables.py) — regenerates `confusables_data.rs` from Unicode UTS #39 `confusables.txt`. Pure stdlib (no dependencies); resolves its paths relative to the repo root, so run it from anywhere.
 - [scripts/gen_flowcrypt.py](scripts/gen_flowcrypt.py) — regenerates `flowcrypt_data.rs` from the FlowCrypt `idn-homographs-database` JSON. Accepts `--homographs`, `--confusables`, `--source-commit`, `--source-date` for offline/pinned use; fetches from GitHub by default. The 19 MB source JSON is not committed.
@@ -44,6 +58,17 @@ Three modes, dispatched by a thin `main()`:
 | single pair | two positionals | the two args | `a`/`b` |
 | stdin batch | `--stdin` | pre-paired tab/comma lines | `a`/`b` |
 | watchlist | `--string` + `--list` | `--string` × each file line | `input`/`match` |
+
+**Emit gate (batch/list only).** `may_emit` in `main.rs` rejects candidates from string lengths
+alone, before any panel is built — on a registry corpus that is nearly all of them. Every bound is
+an *exact* lower bound, so the gate is a pure short-circuit, never a heuristic filter: with `-t`,
+edit distance is at least the length difference on whichever strings the chosen metric scores (raw
+for `levenshtein`/`damerau`, skeleton for the skeleton axes; the other axes have no cheap bound and
+are not gated); with `--typosquat`, a row is emitted only as `likely_typosquat` — needing
+`damerau <= 1` (lengths within 1) or `confusable_only` (equal skeletons, hence equal skeleton
+length) — or as a combosquat, which is a string test. **If you add or change an emit condition, the
+gate must be widened to match**, or rows will silently vanish. `gate_never_drops_a_row_the_filter_
+would_keep` cross-checks gated against unconditional scoring over every metric × threshold × mode.
 
 **`--typosquat` profile:** opt-in package-registry detection profile. Default emit set is five axes (`equal`, `damerau`, `skeleton_damerau`, `confusable_only`, `keyboard_distance`); default `--metric` becomes `damerau` (unless `-m` was passed). Classifies each pair as `identical` / `same_project` / `likely_typosquat` / `possible_combosquat` / `unrelated` and emits `classification` + `reason` JSON keys (after axes). In batch/list mode, emits **only** `likely_typosquat` and `possible_combosquat` rows and exits 1 if none. Cannot combine with `-t`/`--threshold`. `classification` is not an axis — `--fields` remains axis-only. A possible combosquat is a delimited affix/token of the other scored name (`-`, `_`, `.`, `/`; shorter side ≥ 3 chars).
 
