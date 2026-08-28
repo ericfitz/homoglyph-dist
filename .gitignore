@@ -4,3 +4,7 @@ confusables.txt
 .claude/scheduled_tasks.lock
 
 .worktrees/
+/corpus
+/golden
+/bench-out
+dhat-heap.json
