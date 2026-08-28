@@ -63,36 +63,105 @@ fn build_ops(steps: &[NormStep]) -> Result<Vec<normalize::NormOp>, String> {
     Ok(ops)
 }
 
+/// The string-level half of `prepare_pair`: normalization and the identity gate,
+/// deciding which strings the panel will actually score. Cheap — no panel.
+struct PairPrep {
+    a_norm: Option<String>,
+    b_norm: Option<String>,
+    identical: bool,
+    same_project: bool,
+}
+
+impl PairPrep {
+    /// The two strings the panel scores: the normalized forms, except for
+    /// identity-gated pairs, which are scored on their originals.
+    fn scored<'s>(&'s self, a: &'s str, b: &'s str) -> (&'s str, &'s str) {
+        if self.a_norm.is_some() && !self.identical && !self.same_project {
+            (
+                self.a_norm.as_deref().unwrap(),
+                self.b_norm.as_deref().unwrap(),
+            )
+        } else {
+            (a, b)
+        }
+    }
+}
+
+fn prep_pair(a: &str, b: &str, ops: &[normalize::NormOp]) -> PairPrep {
+    let on = !ops.is_empty();
+    let a_norm = on.then(|| normalize::apply_ops(a, ops));
+    let b_norm = on.then(|| normalize::apply_ops(b, ops));
+    let identical = a == b;
+    let same_project = on && !identical && a_norm.as_deref() == b_norm.as_deref();
+    PairPrep {
+        a_norm,
+        b_norm,
+        identical,
+        same_project,
+    }
+}
+
 fn prepare_pair(
     a: &str,
     b: &str,
     ops: &[normalize::NormOp],
     cmap: &confusables::ConfusableMap,
 ) -> PairScore {
-    let on = !ops.is_empty();
-    let a_norm = on.then(|| normalize::apply_ops(a, ops));
-    let b_norm = on.then(|| normalize::apply_ops(b, ops));
-    let identical = a == b;
-    let same_project = on && !identical && a_norm.as_deref() == b_norm.as_deref();
-    let (sa, sb): (&str, &str) = if on && !identical && !same_project {
-        (a_norm.as_deref().unwrap(), b_norm.as_deref().unwrap())
-    } else {
-        (a, b)
+    let prep = prep_pair(a, b, ops);
+    let (scored_a, scored_b, panel) = {
+        let (sa, sb) = prep.scored(a, b);
+        (sa.to_string(), sb.to_string(), score_pair(sa, sb, cmap))
     };
-    let panel = score_pair(sa, sb, cmap);
-    let scored_a = sa.to_string();
-    let scored_b = sb.to_string();
     PairScore {
         a: a.to_string(),
         b: b.to_string(),
-        a_norm,
-        b_norm,
+        a_norm: prep.a_norm,
+        b_norm: prep.b_norm,
         panel,
         scored_a,
         scored_b,
-        identical,
-        same_project,
+        identical: prep.identical,
+        same_project: prep.same_project,
     }
+}
+
+/// Could this pair possibly survive the emit filter? Conservative in the safe
+/// direction: it may return true for a pair that is later dropped, but never
+/// false for one that would be kept — every bound below is an exact lower bound
+/// on the distance it gates. Batch modes use it to skip building the panel on
+/// candidates that can never be emitted, which is nearly all of them on a real
+/// registry corpus.
+fn may_emit(
+    sa: &str,
+    sb: &str,
+    metric: &str,
+    threshold: Option<f64>,
+    typosquat: bool,
+    cmap: &confusables::ConfusableMap,
+) -> bool {
+    if typosquat {
+        // Emitted only as likely_typosquat — which needs `damerau <= 1`
+        // (so the lengths differ by at most 1) or `confusable_only` (so the
+        // skeletons are equal, hence the same length) — or as a combosquat,
+        // which is a cheap string test.
+        return sa.chars().count().abs_diff(sb.chars().count()) <= 1
+            || cmap.skeleton_len(sa) == cmap.skeleton_len(sb)
+            || verdict::is_possible_combosquat(sa, sb);
+    }
+    let Some(t) = threshold else {
+        return true;
+    };
+    // Edit distance is at least the length difference, on the strings the
+    // metric is measured over.
+    let bound = match metric {
+        "levenshtein" | "damerau" => sa.chars().count().abs_diff(sb.chars().count()),
+        "skeleton_levenshtein" | "skeleton_damerau" => {
+            cmap.skeleton_len(sa).abs_diff(cmap.skeleton_len(sb))
+        }
+        // No cheap exact lower bound for the remaining axes.
+        _ => return true,
+    };
+    bound as f64 <= t
 }
 
 /// The selected axis keys to emit, in canonical order: all when None.
@@ -242,6 +311,12 @@ fn score_candidate(
     if line.is_empty() {
         return None;
     }
+    let prep = prep_pair(string, line, ops);
+    let (sa, sb) = prep.scored(string, line);
+    if !may_emit(sa, sb, metric, threshold, typosquat, cmap) {
+        return None;
+    }
+    drop(prep);
     keep_scored(
         prepare_pair(string, line, ops, cmap),
         metric,
@@ -949,6 +1024,73 @@ mod tests {
         assert!(batch_matched_ok(None, false, true));
         assert!(batch_matched_ok(Some(0.5), false, true));
         assert!(!batch_matched_ok(Some(0.5), false, false));
+    }
+
+    #[test]
+    fn gate_never_drops_a_row_the_filter_would_keep() {
+        // The emit gate is only sound if it is a pure short-circuit: gated
+        // scoring must produce exactly what unconditional scoring + filtering
+        // produces, for every metric and threshold.
+        let cmap = cmap();
+        let queries = [
+            "requests",
+            "lodash",
+            "paypal",
+            "py",
+            "foo-bar",
+            "p\u{0430}ypal",
+        ];
+        let candidates = [
+            "requests",
+            "reqeusts",
+            "request",
+            "requestss",
+            "rquests",
+            "requests-dev",
+            "lodash",
+            "lodahs",
+            "lodash.utils",
+            "xylophone",
+            "paypal",
+            "paypa1",
+            "p\u{0430}ypal",
+            "py",
+            "pyy",
+            "p",
+            "foo_bar",
+            "foo.bar",
+            "",
+        ];
+        for metric in axes::numeric_keys() {
+            for threshold in [None, Some(0.0), Some(1.0), Some(2.0), Some(5.0)] {
+                for typosquat in [false, true] {
+                    if typosquat && threshold.is_some() {
+                        continue; // rejected at the CLI
+                    }
+                    for q in queries {
+                        for c in candidates {
+                            let gated =
+                                score_candidate(q, c, metric, threshold, &cmap, &[], typosquat);
+                            let ungated = (!c.trim().is_empty())
+                                .then(|| {
+                                    keep_scored(
+                                        prepare_pair(q, c.trim(), &[], &cmap),
+                                        metric,
+                                        threshold,
+                                        typosquat,
+                                    )
+                                })
+                                .flatten();
+                            assert_eq!(
+                                gated.is_some(),
+                                ungated.is_some(),
+                                "{q} vs {c} (metric={metric}, t={threshold:?}, typo={typosquat})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

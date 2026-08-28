@@ -128,7 +128,7 @@ impl TyposquatClass {
 /// suffix, or token of the longer. Separators: `-`, `_`, `.`, `/`.
 /// `react` vs `reactive` is false (no delimiter); `lodash` vs `lodash-utils`
 /// is true.
-fn is_possible_combosquat(a: &str, b: &str) -> bool {
+pub fn is_possible_combosquat(a: &str, b: &str) -> bool {
     let a = a.to_lowercase();
     let b = b.to_lowercase();
     if a == b {

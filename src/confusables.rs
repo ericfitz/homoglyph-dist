@@ -157,6 +157,19 @@ impl ConfusableMap {
         out
     }
 
+    /// Length in chars of the skeleton of `s`, without building it.
+    ///
+    /// Used by the list-mode emit gate: skeletons that differ in length can
+    /// never be equal, and edit distance is at least the length difference.
+    pub fn skeleton_len(&self, s: &str) -> usize {
+        if !self.digraphs.is_empty() {
+            return self.skeleton_chars(s).len();
+        }
+        s.chars()
+            .map(|c| self.skeleton_of(c).map_or(1, |sk| sk.chars().count()))
+            .sum()
+    }
+
     /// String form of [`ConfusableMap::skeleton_chars`]. Test-only: the hot
     /// path wants chars.
     #[cfg(test)]
