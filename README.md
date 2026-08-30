@@ -46,7 +46,7 @@ To check your installed version:
 
 ```sh
 sqdist --version
-# sqdist 0.5.0 (<sha>)
+# sqdist 0.6.0 (<sha>)
 ```
 
 ## Axes
@@ -438,7 +438,7 @@ access** are needed for confusables. sqdist has one compiled dependency:
 per embedded confusable source (regardless of `--confusables`):
 
 ```
-sqdist 0.5.0 (<sha>)
+sqdist 0.6.0 (<sha>)
   data: UTS#39 confusables.txt v17.0.0 (2025-07-22)
   data: FlowCrypt idn-homographs-database @ f27b783 (retrieved 2021-05-26)
 ```

@@ -161,6 +161,9 @@ After regenerating, run `cargo test` to confirm the FlowCrypt-related tests pass
 
 **v0.3.0 BREAKING CHANGE:** The JSON output schema changed significantly from v0.2.0. Downstream parsers must update key names. Keys removed: `homoglyph_damerau`, `normalized`, `skeleton_normalized`. Keys added: `equal`, `skeleton_levenshtein`, `uts39_confusable_count`, `uts39_skeleton_delta`. The `--hogl-weight`/`-w` flag is gone (now an unknown-option error). `--metric` now takes an axis key (default `skeleton_damerau`) rather than `homoglyph|skeleton`.
 
+**v0.6.0:** no output change. Performance only — the emit gate, the prepared query, and the
+per-pair allocation work. The JSON contract is byte-identical to 0.5.0 (`scripts/golden.sh check`).
+
 **v0.5.0 (additive):** `--typosquat`, `--pypi`, and `-n`/`--normalize <PATH>`. Default `sqdist a b` JSON and spoof/benign verdict are unchanged when none of those flags are set. Opt-in JSON keys under the new flags: `classification` / `reason` (with `--typosquat`); `a_normalized` / `b_normalized` or `input_normalized` / `match_normalized` (when a normalizer ran).
 
 Both human and JSON output expose the same fields, relied on by downstream pipelines — keep the JSON key names stable. Canonical key order and meaning: see the 10-axis panel table above. `AxisValue` has an `NA` variant that renders as JSON `null` and human `n/a`; `keyboard_distance` uses it when either string is non-ASCII.
